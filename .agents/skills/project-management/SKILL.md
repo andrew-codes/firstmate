@@ -52,9 +52,16 @@ The optional `+yolo` posture changes routine approval authority but does not cha
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the complete authority boundary and exceptions when it is on.
 
+## Forge
+
+The registry's optional `forge=` bracket token (`bin/fm-project-mode.sh --forge` is its one-owner reader) names the git forge the project's PR lifecycle runs against: `github` (default) or `bitbucket` (Bitbucket Cloud only; self-hosted Bitbucket Server/Data Center is out of scope).
+Propose `forge=bitbucket` when the given or detected remote's host is `bitbucket.org`, and default to `forge=github` for every other remote or for a `local-only` project with no remote, stating the resolved default while confirming the other posture choices rather than asking the captain to invent one.
+Existing registry entries with no `forge=` token keep meaning `github`; adding this token to a new or existing entry never migrates or reinterprets any other entry, so every prior GitHub-forge workflow is unaffected.
+A `bitbucket`-forge project needs `twg`'s own opt-in Bitbucket credential, not just its baseline Atlassian OAuth; see `bootstrap-diagnostics`'s `NEEDS_BB_AUTH` entry if bootstrap reports it unconfigured.
+
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
+Confirm the source URL, local project name, delivery posture, autonomy posture, and forge, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
@@ -62,10 +69,11 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 
 ## Create a project
 
-Creating a GitHub repository is outward-facing.
-Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
-Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+Creating a repository on the target forge is outward-facing.
+Before making that remote change, propose the repository name, owner or organization, visibility, delivery posture, and forge, defaulting visibility to private, the posture to `no-mistakes-prod-only`, and the forge to `github` (or `bitbucket` when the captain names a Bitbucket Cloud destination), then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
+Use `gh-axi` for an approved GitHub creation; a Bitbucket creation is out of scope for this skill today (no `twg`-driven repository-creation flow exists yet), so route a requested Bitbucket repository creation to the captain rather than inventing one.
+Consult the chosen tool's current help rather than relying on remembered flags.
+After remote creation succeeds, clone it locally, add the registry entry (including the resolved `forge=` token), and initialize it according to its delivery posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
