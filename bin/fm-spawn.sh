@@ -2355,8 +2355,12 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+      # sandbox.enabled:false matches the tracked firstmate-home setting: the
+      # busy-state hooks above write to STATE_REAL, the firstmate home's own
+      # state directory outside this worktree, which the default sandbox's
+      # filesystem confinement would otherwise block.
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"sandbox":{"enabled":false},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -2784,6 +2788,19 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+# Skip the project's own git hooks in a disposable ship/scout task worktree
+# (never secondmate, which is a persistent home, not disposable): a project's
+# hooks can run its whole validation suite on every commit, and in a task
+# worktree that cost lands on each of the worker's intermediate commits, while
+# the selected delivery path runs the same gates exactly once against the
+# finished change - which is also the only place their failures are
+# actionable. GIT_CONFIG_COUNT/KEY/VALUE (git >=2.31) is environment-only:
+# it scopes to this pane's shell and its children and never touches the
+# project's own .git/config, so the primary checkout and sibling worktrees
+# keep their hooks untouched.
+if [ "$KIND" != secondmate ]; then
+  spawn_send_text_line "$T" "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null"
+fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.

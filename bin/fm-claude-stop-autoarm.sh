@@ -109,7 +109,13 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   case "$LOCK_PID" in
     ''|*[!0-9]*) exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  # Recover only on POSITIVE evidence the recorded owner is gone. "unknown"
+  # (process inspection sandboxed off) must stay inert exactly like "alive" -
+  # otherwise a live owner whose ps/kill calls are blocked looks stale and
+  # this hook would steal its lock out from under it.
+  case "$(fm_harness_pid_status "$LOCK_PID")" in
+    alive|unknown) exit 0 ;;
+  esac
   RECOVER_SESSION_LOCK=1
 fi
 
