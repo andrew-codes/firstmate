@@ -440,6 +440,31 @@ test_bitbucket_repo_override_args_refuse_before_recording() {
   pass "fm-pr-merge refuses Bitbucket workspace override args before recording state"
 }
 
+test_bitbucket_short_repo_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case bitbucket-short-repo-override)
+  mkdir -p "$case_dir/wt"
+  add_twg_mocks "$case_dir" 9999999999999999999999999999999999999999
+  : > "$case_dir/twg.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://bitbucket.org/right/repo/pull-requests/5 -- -r other-repo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-short-repo-override: fm-pr-merge should refuse -r repo override flags"
+  assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
+    "bitbucket-short-repo-override: refusal did not explain the -r override"
+  assert_no_grep 'pr=https://bitbucket.org/right/repo/pull-requests/5' "$case_dir/state/task-x1.meta" \
+    "bitbucket-short-repo-override: PR URL was recorded before rejecting -r override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "bitbucket-short-repo-override: -r override armed a merge poll"
+  assert_no_grep 'pull-requests merge' "$case_dir/twg.log" \
+    "bitbucket-short-repo-override: twg pull-requests merge was invoked despite -r override"
+  pass "fm-pr-merge refuses Bitbucket -r repo override args before recording state"
+}
+
 test_bitbucket_parses_pr_url() {
   local case_dir
   case_dir=$(make_case bitbucket-url-parsing)
@@ -471,4 +496,5 @@ test_bitbucket_merge_failure_propagates_after_recording
 test_bitbucket_extra_merge_args_forwarded
 test_bitbucket_explicit_merge_strategy_not_overridden
 test_bitbucket_repo_override_args_refuse_before_recording
+test_bitbucket_short_repo_override_args_refuse_before_recording
 test_bitbucket_parses_pr_url

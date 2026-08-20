@@ -78,7 +78,7 @@ reject_repo_overrides() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --repo|--repo=*|-R|-R?*|--workspace|--workspace=*|-w|-w?*)
+      --repo|--repo=*|-R|-R?*|--workspace|--workspace=*|-w|-w?*|-r|-r?*)
         echo "error: extra merge arguments must not override the repository" >&2
         return 1
         ;;
