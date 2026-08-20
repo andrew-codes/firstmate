@@ -138,6 +138,11 @@
 #   origin, resolves the current remote default branch, and resets to its tip.
 #   An unreachable origin, unresolved default branch, or non-clean worktree
 #   refuses the spawn rather than risking a PR based on stale history.
+#   Right after that reset, an optional tracked firstmate.yml at the project's
+#   repo root is applied: gitignored files copied into the worktree and one
+#   post_create command run there. docs/configuration.md "Per-project worktree
+#   setup (firstmate.yml)" owns the schema and trust boundary;
+#   bin/fm-worktree-config-lib.sh is the one parser.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -260,6 +265,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-trace-context-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-worktree-config-lib.sh
+. "$SCRIPT_DIR/fm-worktree-config-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2262,6 +2269,38 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+
+  # Optional per-project worktree setup (docs/configuration.md "Per-project
+  # worktree setup (firstmate.yml)"): copy gitignored files the project needs
+  # for local dev/e2e (e.g. .env) from the primary checkout into this fresh
+  # worktree, then run one configured setup command (e.g. yarn install).
+  # Read only here, right after the hard reset above and before any
+  # crewmate-controlled commit exists in this worktree - the same trusted
+  # default-branch boundary no-mistakes' own repo config uses.
+  FM_YML="$WT/firstmate.yml"
+  if [ -f "$FM_YML" ]; then
+    FM_COPY_FILES=$(fm_worktree_config_copy_files "$FM_YML") || true
+    while IFS= read -r fm_copy_name; do
+      [ -n "$fm_copy_name" ] || continue
+      if [ ! -f "$PROJ_ABS/$fm_copy_name" ]; then
+        echo "warning: firstmate.yml copy_files entry '$fm_copy_name' not found at $PROJ_ABS/$fm_copy_name; skipping" >&2
+        continue
+      fi
+      cp "$PROJ_ABS/$fm_copy_name" "$WT/$fm_copy_name" || {
+        echo "error: could not copy '$fm_copy_name' into worktree $WT" >&2
+        exit 1
+      }
+    done <<EOF
+$FM_COPY_FILES
+EOF
+
+    if FM_POST_CREATE=$(fm_worktree_config_post_create "$FM_YML") && [ -n "$FM_POST_CREATE" ]; then
+      if ! (cd "$WT" && sh -c "$FM_POST_CREATE"); then
+        echo "error: firstmate.yml post_create command failed: $FM_POST_CREATE" >&2
+        exit 1
+      fi
+    fi
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't

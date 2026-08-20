@@ -136,6 +136,27 @@ It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
 
+## Per-project worktree setup (firstmate.yml)
+
+A registered project may carry an optional `firstmate.yml` at its repo root, read by `bin/fm-spawn.sh` for every ship or scout worktree it creates (never for a relaunch, which reuses an existing worktree, and never for a secondmate home).
+It configures two things a fresh disposable worktree cannot get from `git clone` alone: gitignored local files the project needs for development or e2e tests (most commonly a `.env`), and one setup command to run once the worktree is ready (`yarn install`, a codegen step, and the like).
+
+```yaml
+copy_files:
+  - .env
+  - .env.local
+post_create: scripts/dev-setup.sh
+```
+
+Both keys are optional.
+Each `copy_files` entry must be a plain relative filename with no path separator and no `..` - `bin/fm-worktree-config-lib.sh`'s `fm_worktree_config_valid_copy_entry` is the one validator - so an entry can only ever copy `<project root>/<name>` to `<worktree root>/<name>`; anything else is refused rather than silently widened.
+`post_create` is one shell command (or a path to a script in the repo) run with the worktree as its working directory; a nonzero exit refuses the spawn rather than launching a crewmate into a half-set-up worktree.
+Malformed content in either key is reported as a `warning:` on spawn's stderr and that key is skipped rather than guessed at; it never blocks the spawn by itself.
+
+`bin/fm-worktree-config-lib.sh` is the one parser and states the exact recognized shape in its header; it is deliberately not a general YAML parser.
+It is read only once, immediately after the worktree is freshly fetched and hard-reset to the project's own default branch and before any crewmate-controlled commit can exist in it - the same trusted, pinned-to-a-fresh-fetch boundary the `no-mistakes` gate itself uses for its own trusted repo config (see that project's `AGENTS.md` "Repo Config Trust Boundary").
+A task's own later commits on its own branch can therefore never cause this file to be re-read for that task.
+
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
 Domain-local preferences for one captain's fleet live locally in each home's `data/captain.md`; it is gitignored and printed in the session-start context digest after `data/projects.md` and optional `data/secondmates.md`.
