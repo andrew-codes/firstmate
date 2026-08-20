@@ -928,6 +928,44 @@ SH
   pass "bootstrap: FM_BOOTSTRAP_NETWORK partitions one run into local and network halves"
 }
 
+test_bitbucket_auth_gated_on_registered_forge() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/bitbucket-auth"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  cat > "$fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TWG_LOG"
+[ "${FM_TEST_TWG_AUTH_OK:-0}" = 1 ] || exit 77
+exit 0
+SH
+  chmod +x "$fakebin/twg"
+
+  # No registered project has forge=bitbucket, so no Bitbucket auth probe runs at all.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_TEST_TWG_LOG="$case_dir/twg-none.log" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "NEEDS_BB_AUTH" "no Bitbucket-forge project should not probe Bitbucket auth"
+  [ ! -s "$case_dir/twg-none.log" ] || fail "twg was invoked with no registered Bitbucket-forge project"
+
+  # A registered forge=bitbucket project with unconfigured Bitbucket auth reports NEEDS_BB_AUTH.
+  cat > "$case_dir/home/data/projects.md" <<'EOF'
+- bb-project [direct-PR forge=bitbucket] - a Bitbucket-backed project (added 2026-01-01)
+EOF
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_TEST_TWG_LOG="$case_dir/twg-fail.log" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "NEEDS_BB_AUTH" "a registered Bitbucket-forge project should probe and report unconfigured auth"
+  grep -qF -- "bitbucket pull-requests query --scope me" "$case_dir/twg-fail.log" \
+    || fail "the Bitbucket auth probe did not call twg bitbucket pull-requests query --scope me"
+
+  # Real Bitbucket auth success stays silent, exactly like NEEDS_GH_AUTH's own probe.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_TEST_TWG_LOG="$case_dir/twg-ok.log" FM_TEST_TWG_AUTH_OK=1 \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "NEEDS_BB_AUTH" "configured Bitbucket auth should not report NEEDS_BB_AUTH"
+  pass "bootstrap probes Bitbucket auth only when a registered project has forge=bitbucket, and reports failure honestly"
+}
+
 test_network_sweeps_recheck_lock_ownership() {
   local case_dir fakebin fake_root marker out
   case_dir="$TMP_ROOT/network-lock-handoff"
@@ -1171,6 +1209,7 @@ test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
+test_bitbucket_auth_gated_on_registered_forge
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once

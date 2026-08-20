@@ -3,8 +3,8 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL (including one on a
+# self-hosted instance), and a Bitbucket Cloud pull request URL are accepted.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -33,6 +33,8 @@ PROVIDER=$FM_PR_PROVIDER
 HOST=$FM_PR_HOST
 PROJECT_PATH=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER
+OWNER=$FM_PR_OWNER
+REPO=$FM_PR_REPO
 
 # Task-derived paths are constructed only after the canonical ID validation.
 META="$STATE/$ID.meta"
@@ -58,6 +60,14 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
+# Same reasoning for Bitbucket: the poll is silent on every error by design,
+# so a missing twg would be indistinguishable from a pull request that is
+# never merged.
+if [ "$PROVIDER" = bitbucket ] && ! command -v twg >/dev/null 2>&1; then
+  echo "error: watching a Bitbucket pull request requires twg on PATH" >&2
+  exit 1
+fi
+
 # Neutralize any pre-fix poll before recording or arming this task. The
 # migration never executes legacy artifacts and holds watcher exclusion while
 # it quarantines or rebuilds them.
@@ -75,6 +85,20 @@ WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
+    && fm_pr_head_valid "$REMOTE_HEAD"; then
+    PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+# Best-effort for Bitbucket: source.commit.hash is Bitbucket's PR-object field
+# for the source branch's current commit, read the same way glab's state is
+# read (a literal token match, no JSON processor required). This field path
+# has not been verified against a real Bitbucket PR; a wrong or missing field
+# only loses the optional pr_head the same way a GitLab task already does.
+if [ "$PROVIDER" = bitbucket ] && [ -n "$OWNER" ] && [ -n "$REPO" ] && command -v twg >/dev/null 2>&1; then
+  if RAW_HEAD=$(twg bitbucket pull-requests get "$NUMBER" --workspace "$OWNER" --repo "$REPO" \
+      --output json --output-summary inline --agent-fields source.commit.hash 2>/dev/null) \
+    && REMOTE_HEAD=$(printf '%s\n' "$RAW_HEAD" | grep -oE '"hash"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+      | sed -n 's/.*:[[:space:]]*"\([^"]*\)"$/\1/p') \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
