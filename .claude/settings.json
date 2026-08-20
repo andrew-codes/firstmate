@@ -1,4 +1,12 @@
 {
+  "sandbox": {
+    "enabled": false
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bin/fm-*)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {

@@ -143,13 +143,49 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
-fm_harness_pid_alive() {
+# True when process inspection itself is trustworthy in this environment.
+# Probes against $$, which is always a live, inspectable process when ps and
+# kill(2) are actually permitted - so a failure here means the sandbox is
+# refusing process inspection outright (Claude Code's default sandbox refuses
+# setuid /bin/ps and kill(2) on other processes), not that some other pid is
+# gone. Callers must run this probe before trusting any "dead" verdict from
+# kill -0 or ps on a DIFFERENT pid, because a blocked kill/ps looks exactly
+# like "no such process" otherwise.
+fm_process_inspection_works() {
+  kill -0 $$ 2>/dev/null || return 1
+  [ -n "$(ps -o comm= -p $$ 2>/dev/null)" ]
+}
+
+# Tri-state liveness for pid $1: prints exactly one of "alive", "dead", or
+# "unknown", always exits 0.
+#
+# "unknown" means process inspection could not be trusted for this pid - the
+# sandbox is blocking ps/kill, not that the recorded owner has actually
+# exited. Treating "unknown" as "dead" is the exact bug this function exists
+# to prevent: a live lock holder whose ps/kill calls are sandboxed off would
+# otherwise look stale and have its lock stolen out from under it. Callers
+# that need to distinguish "confirmed gone" from "cannot verify" must switch
+# on this tri-state instead of the boolean fm_harness_pid_alive below.
+fm_harness_pid_status() {  # <pid>
   local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  fm_process_inspection_works || { printf 'unknown\n'; return 0; }
+  kill -0 "$pid" 2>/dev/null || { printf 'dead\n'; return 0; }
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || { printf 'unknown\n'; return 0; }
   args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  if fm_harness_process_matches "$comm" "$args"; then
+    printf 'alive\n'
+  else
+    printf 'dead\n'
+  fi
+}
+
+# True if $1 is a live process that looks like a verified harness. A thin
+# boolean wrapper over fm_harness_pid_status for callers that only need yes/no
+# and are fine treating "unknown" as not-alive (e.g. a status display); a
+# caller that must NOT act on an unverifiable owner (recovery, lock stealing)
+# needs the tri-state form above instead.
+fm_harness_pid_alive() {
+  [ "$(fm_harness_pid_status "$1")" = alive ]
 }
 
 # True when state dir $1 holds a session lock whose pid is ANY harness ancestor
