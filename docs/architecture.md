@@ -246,10 +246,32 @@ A ship brief records its mode as a fixed machine-readable line and the spawn ref
 When a selected delivery path calls for a diff, `bin/fm-review-diff.sh` refreshes the authoritative base and, when task meta records `pr=`, always fetches and compares against `refs/pull/<n>/head` by default (recorded `pr_head=` is only an offline fallback) before falling back to the local branch with a warning.
 Where a no-mistakes pipeline stores evidence in the repo, it publishes that PR-viewable validation evidence to an orphan evidence branch that shares no history with code branches, so it never enters the crew branch or the default branch.
 This repo uses that setting, and its own `.no-mistakes/` directory remains local state that stays gitignored and is rejected by CI if tracked; [`configuration.md`](configuration.md) owns the setting.
-PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling `gh-axi pr merge`.
-The helper requires a full `https://github.com/<owner>/<repo>/pull/<n>` URL, invokes `gh-axi pr merge <n> --repo <owner>/<repo>`, defaults to `--squash`, preserves explicit merge-method flags, and rejects malformed URLs or repo override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge.
+PR-based task merges go through `bin/fm-pr-merge.sh`, which records `pr=` and any available `pr_head=` through `bin/fm-pr-check.sh` before calling the resolved forge's own merge command.
+The helper requires a full canonical PR URL, defaults GitHub to `--squash` and Bitbucket to `--merge-strategy squash`, preserves explicit merge-method/strategy flags, and rejects malformed URLs or repository-override flags before recording merge state; a well-formed GitLab merge request URL (see [docs/gitlab-merge-watch.md](gitlab-merge-watch.md)) is refused too, explicitly, rather than sent to the wrong forge - its own header owns exactly which forges it does support.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header owns the landed-work proofs, PR-discovery fallback, and stale-lock recovery procedure.
+
+## Forge dispatch: GitHub, GitLab, Bitbucket
+
+Firstmate's PR-lifecycle scripts dispatch on the git forge a PR or MR URL belongs to, not on a project-level flag, for everything that already has a URL in hand.
+[`bin/fm-pr-lib.sh`](../bin/fm-pr-lib.sh)'s `fm_pr_url_parse` is the one-owner parser for the URL grammar and the resulting provider-tagged identity (`FM_PR_PROVIDER`, `FM_PR_URL`, `FM_PR_HOST`, `FM_PR_PATH`, and - for GitHub and Bitbucket - `FM_PR_OWNER`/`FM_PR_REPO`); its own header owns the exact patterns and validation rules, not this doc.
+`bin/fm-pr-poll.sh` (the byte-static merge-watch check), `bin/fm-pr-check.sh` (arm-time tool check and best-effort `pr_head` capture), `bin/fm-pr-merge.sh` (merge dispatch), and `bin/fm-teardown.sh` (landed-work verification) each branch on that parsed provider with the same `case "$provider" in github) ... gitlab) ... bitbucket) ... esac` shape, reusing one proven pattern across forges rather than a plugin/adapter abstraction layer (see `data/bitbucket-twg-scout/report.md` §3 for the reasoning against over-abstracting for two known forges).
+Each provider is read through its own standard CLI: `gh`/`gh-axi` for GitHub, `glab` for GitLab, and `twg` for Bitbucket Cloud (`twg bitbucket ...`, invoked with `--output json --output-summary auto|inline --agent-fields <preset>` to keep responses compact - `twg` has no literal "TOON" output mode).
+GitLab is parsed everywhere a URL needs recognizing, so the merge-watch poll can follow it, but is refused explicitly by the merge path; Bitbucket Cloud is not - `fm-pr-merge.sh` accepts both `github` and `bitbucket`.
+Bitbucket support is scoped to Bitbucket **Cloud** only (workspace/repository addressing); self-hosted Bitbucket Server/Data Center uses a different project/repo model this pattern does not address.
+
+A project-level `forge=github|bitbucket` token in `data/projects.md`'s bracket annotation (default `github`; `bin/fm-project-mode.sh --forge <project>` is its one-owner reader, documented in that script's own header) covers the smaller set of operations that happen *before* a PR URL exists and so cannot dispatch on one:
+
+- `bin/fm-brief.sh` renders forge-conditional GitHub/Bitbucket-operations and PR-creation instructions into generated ship and scout briefs.
+- The `project-management` skill proposes `forge=bitbucket` at project add/create time when the given or detected remote's host is `bitbucket.org`, defaulting to `forge=github` otherwise.
+- `bin/fm-bootstrap.sh` emits `NEEDS_BB_AUTH` - Bitbucket's own opt-in `twg` credential, separate from baseline Atlassian OAuth - only when a registered project actually has `forge=bitbucket`, mirroring `NEEDS_GH_AUTH`; see `bootstrap-diagnostics`.
+
+Existing registry entries with no `forge=` token are unaffected by any of this and keep meaning `github`.
+
+`bin/fm-teardown.sh`'s Bitbucket landed-work branch resolves a recorded `pr=` URL's state and head commit via `twg bitbucket pull-requests get`, mirroring the shape of the GitHub `gh pr view` lookup its header already documents.
+It deliberately does not implement a Bitbucket branch-name PR-discovery fallback (the "no `pr=` was ever recorded" edge case GitHub covers via `gh-axi pr list --head <branch>`): that would be new, unverified query surface for a case the forge-agnostic content-in-default check already covers safely for the common squash-merge flow, so an unrecorded Bitbucket PR falls back to that check instead.
+Two Bitbucket-specific assumptions were written defensively but not yet confirmed against a real Bitbucket Cloud remote - a wrong guess in either only causes an extra safe refusal, never a false "landed": the `source.commit.hash` JSON field path (shared with `bin/fm-pr-check.sh`'s best-effort `pr_head` capture), and the `refs/pull-requests/<n>/from` fetch ref used to recover a PR head commit not already present locally.
+Both need a live registered Bitbucket Cloud project to verify.
 
 ## Optional Relay
 

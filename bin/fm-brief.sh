@@ -29,9 +29,9 @@
 #   without it carry a loud declaration so an omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never reads it:
+# captain's standing posture as context, and this script never reads it for mode:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
+#   direct-PR    implement -> push + open PR via the project's forge CLI (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
@@ -54,6 +54,12 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# The generated GitHub-operations and PR-creation instruction text (scout and
+# ship rule 3, and the direct-PR definition of done) is forge-conditional: it
+# is read from the <repo-name>'s forge= registry value via
+# bin/fm-project-mode.sh --forge (the one-owner reader of that grammar),
+# defaulting to github the same way that reader does for an unregistered
+# project or an absent registry.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -266,6 +272,26 @@ fi
 
 REPO=${POS[1]}
 
+# forge-conditional instruction text: the resolved project's forge= registry
+# value (bin/fm-project-mode.sh --forge is its one-owner reader) decides which
+# forge CLI the generated brief tells the crewmate to use. Falls back to
+# github on any resolution failure, matching that reader's own default.
+FORGE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge "$REPO" 2>/dev/null) || FORGE=github
+case "$FORGE" in
+  bitbucket) ;;
+  *) FORGE=github ;;
+esac
+case "$FORGE" in
+  bitbucket)
+    FORGE_TOOL_LINE="twg for Bitbucket operations"
+    FORGE_PR_INSTRUCTION="push your branch and open a pull request with \`twg bitbucket pull-requests create\` (workspace and repo come from the \`origin\` remote; use \`--source <branch> --dest <default-branch> -t <title>\`)"
+    ;;
+  *)
+    FORGE_TOOL_LINE="gh-axi for GitHub operations"
+    FORGE_PR_INSTRUCTION="push your branch and open a PR with \`gh-axi\`"
+    ;;
+esac
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -316,7 +342,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use $FORGE_TOOL_LINE and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -361,7 +387,7 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, $FORGE_PR_INSTRUCTION, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
     ;;
@@ -430,7 +456,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Use $FORGE_TOOL_LINE and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

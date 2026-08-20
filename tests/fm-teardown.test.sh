@@ -297,6 +297,59 @@ append_pr_meta_url() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
 }
 
+append_bitbucket_pr_meta_url() {
+  local case_dir=$1
+  printf '%s\n' 'pr=https://bitbucket.org/example/repo/pull-requests/7' >> "$case_dir/state/task-x1.meta"
+}
+
+# Override twg so `bitbucket pull-requests get 7 ...` reports PR 7 as merged with
+# the supplied head commit hash, using the same literal state/hash JSON tokens
+# bitbucket_pr_state_and_head() in bin/fm-teardown.sh greps for.
+add_twg_bb_pr_merged_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/twg" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-} \${3:-}" in
+  "bitbucket pull-requests get")
+    printf '{"state": "MERGED", "source": {"commit": {"hash": "$head"}}}\n'
+    exit 0
+    ;;
+esac
+echo "error: unexpected twg invocation: \$*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/twg"
+}
+
+# Override twg so `bitbucket pull-requests get 7 ...` reports PR 7 as still open
+# (not merged), matching a real Bitbucket PR that has not landed yet.
+add_twg_bb_pr_open() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-} ${3:-}" in
+  "bitbucket pull-requests get")
+    printf '{"state": "OPEN"}\n'
+    exit 0
+    ;;
+esac
+echo "error: unexpected twg invocation: $*" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/twg"
+}
+
+# Override twg so every call fails, simulating an API/network/auth error.
+add_twg_error() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+echo "error: twg unavailable" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/twg"
+}
+
 commit_tree_from_wt_head() {
   local case_dir=$1 parent=$2 msg=$3 tree
   tree=$(git -C "$case_dir/wt" rev-parse "$parent^{tree}") || return 1
@@ -765,6 +818,98 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+# Bitbucket-forge coverage: bin/fm-teardown.sh's Bitbucket landed-work branch
+# (bitbucket_pr_state_and_head + pr_is_merged's bitbucket case) mirrors the
+# GitHub squash-merge-then-delete-branch shape, but with the PR resolved via
+# twg instead of gh-axi/gh. See docs/architecture.md's forge-dispatch section
+# and bin/fm-pr-lib.sh's header for the shared URL-based provider dispatch.
+test_bitbucket_squash_merged_pr_allows_when_head_ancestor_of_pr_head() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case bb-squash-ancestor)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_bitbucket_pr_meta_url "$case_dir"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  add_twg_bb_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bb-squash-ancestor: teardown should succeed when local HEAD is in the merged Bitbucket PR head"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "bb-squash-ancestor: teardown printed a REFUSED line"
+  pass "Bitbucket-forge: a merged PR accepts a local HEAD that is an ancestor of the final PR head"
+}
+
+# A Bitbucket PR that has not merged yet must not be treated as landed even
+# though local content already matches origin/main through an unrelated path -
+# this asserts the merged-state check is actually consulted, not bypassed.
+test_bitbucket_open_pr_falls_back_to_content_in_default_allows() {
+  local case_dir rc
+  case_dir=$(make_case bb-open-pr-content-fallback)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_bitbucket_pr_meta_url "$case_dir"
+  add_twg_bb_pr_open "$case_dir"
+  land_on_origin_main "$case_dir" feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bb-open-pr-content-fallback: teardown should succeed via the content-in-default fallback"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "bb-open-pr-content-fallback: teardown printed a REFUSED line"
+  pass "Bitbucket-forge: an unmerged PR falls back to the content-in-default check rather than a false allow"
+}
+
+# twg errors (missing binary, auth failure, network) must never be read as a
+# merge - fail-safe parity with add_gh_axi_error's GitHub coverage.
+test_bitbucket_twg_error_and_content_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case bb-twg-error-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  append_bitbucket_pr_meta_url "$case_dir"
+  add_twg_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bb-twg-error-refuses: teardown should refuse when twg errors and content is not landed"
+  grep -q REFUSED "$case_dir/stderr" || fail "bb-twg-error-refuses: teardown did not print a REFUSED line"
+  pass "Bitbucket-forge: a twg lookup error never allows teardown of unlanded work"
+}
+
+# No pr= was ever recorded for a Bitbucket task (e.g. fm-pr-check.sh never ran):
+# bin/fm-teardown.sh deliberately does not implement a Bitbucket branch-name PR
+# search (see pr_number_from_branch's header), so this must safely refuse
+# rather than crash or silently allow, exactly like the GitHub content-absent
+# case (test_gh_error_and_content_absent_refuses) with no PR discovery at all.
+test_bitbucket_no_pr_recorded_and_content_absent_refuses() {
+  local case_dir rc
+  case_dir=$(make_case bb-no-pr-recorded-refuses)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # No append_bitbucket_pr_meta_url call and no twg mock: state/task-x1.meta has
+  # no pr= line, and content is not landed on origin/main either.
+  ! grep -qE '^pr=' "$case_dir/state/task-x1.meta" \
+    || fail "bb-no-pr-recorded-refuses: test setup bug, meta unexpectedly has a pr= line"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bb-no-pr-recorded-refuses: teardown should refuse with no pr= and no landed content"
+  grep -q REFUSED "$case_dir/stderr" || fail "bb-no-pr-recorded-refuses: teardown did not print a REFUSED line"
+  pass "Bitbucket-forge: no recorded PR and no landed content safely refuses (no branch-search false allow)"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -2614,6 +2759,10 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_bitbucket_squash_merged_pr_allows_when_head_ancestor_of_pr_head
+test_bitbucket_open_pr_falls_back_to_content_in_default_allows
+test_bitbucket_twg_error_and_content_absent_refuses
+test_bitbucket_no_pr_recorded_and_content_absent_refuses
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head

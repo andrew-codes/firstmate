@@ -761,6 +761,13 @@ remove_pr_poll_artifacts() {
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
+# GitHub only: no pr= was recorded, so there is no parsed forge to dispatch on
+# yet. A Bitbucket task always has pr= recorded by bin/fm-pr-check.sh at PR-open
+# time (mirroring the GitHub/GitLab flow), so the no-pr= branch-search fallback
+# below is deliberately not implemented for Bitbucket - it would be new,
+# unverified query surface for an edge case (a PR merged with no pr= ever
+# recorded) that content_in_default already covers safely for the common
+# squash-merge case. See docs/architecture.md's forge-dispatch section.
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
@@ -787,12 +794,50 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+# Read a Bitbucket Cloud pull request's state and source-branch head commit
+# via twg, the same literal-token extraction bin/fm-pr-poll.sh and
+# bin/fm-pr-check.sh already use for the same two fields (no JSON parser
+# dependency). source.commit.hash's exact field path was not confirmed
+# against a real Bitbucket Cloud PR before this ship - the same caveat
+# bin/fm-pr-check.sh's own best-effort pr_head capture already carries. If
+# that field is ever wrong, absent, or twg errors for any other reason, this
+# only returns non-zero (never a false "landed" or a false head value), so
+# the caller falls back to the content-in-default check rather than trusting
+# an unverified result. Needs a live registered Bitbucket project to confirm.
+bitbucket_pr_state_and_head() {
+  local number=$1 workspace=$2 repo=$3 raw state head
+  raw=$(twg bitbucket pull-requests get "$number" --workspace "$workspace" --repo "$repo" \
+    --output json --output-summary inline --agent-fields state,source.commit.hash 2>/dev/null) || return 1
+  state=$(printf '%s\n' "$raw" | grep -oE '"state"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+    | sed -n 's/.*:[[:space:]]*"\([^"]*\)"$/\1/p')
+  head=$(printf '%s\n' "$raw" | grep -oE '"hash"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+    | sed -n 's/.*:[[:space:]]*"\([^"]*\)"$/\1/p')
+  [ -n "$state" ] && [ -n "$head" ] || return 1
+  printf '%s\t%s\n' "$state" "$head"
+}
+
+# Fetch a PR's head commit object into this worktree when it is not already
+# present locally (a squash or merge-commit strategy can create a commit the
+# branch's own history never had). GitHub's refs/pull/<n>/head is a documented,
+# already-proven convention (used unchanged below). The Bitbucket Cloud
+# equivalent used here, refs/pull-requests/<n>/from, was NOT confirmed against
+# a real Bitbucket Cloud remote before this ship - if that guess is wrong the
+# fetch simply fails and this returns non-zero exactly like any other lookup
+# failure, so a wrong ref can only cause an extra safe refusal, never a false
+# "commit exists". Needs a live registered Bitbucket project to confirm.
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local number=$1 commit=$2 provider=${3:-github}
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
+  [ -n "$number" ] || return 1
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  case "$provider" in
+    bitbucket)
+      git -C "$WT" fetch --quiet origin "refs/pull-requests/$number/from" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      git -C "$WT" fetch --quiet origin "refs/pull/$number/head" >/dev/null 2>&1 || return 1
+      ;;
+  esac
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -829,28 +874,56 @@ EOF
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
-# PR from the recorded pr= URL first, then from the branch name, and asks GitHub
-# for both the PR state and head. Returns non-zero when the PR is not merged, the
-# current work is not contained in the PR head, no PR is found, or any gh error
-# occurs - the caller then falls back to the content check.
+# PR from the recorded pr= URL first, then (GitHub only, see
+# pr_number_from_branch's header) from the branch name, and asks the resolved
+# forge for both the PR state and head. Returns non-zero when the PR is not
+# merged, the current work is not contained in the PR head, no PR is found, the
+# forge cannot be determined, or any lookup error occurs - the caller then
+# falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head current provider number workspace repo
+
   if [ -n "$PR_URL" ]; then
-    target=$PR_URL
+    fm_pr_url_parse "$PR_URL" || return 1
+    provider=$FM_PR_PROVIDER
   else
-    target=$(pr_number_from_branch "$branch") || return 1
+    provider=github
   fi
-  [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
-  case "$state" in
-    MERGED|merged) ;;
+
+  case "$provider" in
+    bitbucket)
+      number=$FM_PR_NUMBER
+      workspace=$FM_PR_OWNER
+      repo=$FM_PR_REPO
+      [ -n "$number" ] && [ -n "$workspace" ] && [ -n "$repo" ] || return 1
+      view=$(bitbucket_pr_state_and_head "$number" "$workspace" "$repo") || return 1
+      state=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      [ "$state" = MERGED ] || return 1
+      ;;
+    github)
+      if [ -n "$PR_URL" ]; then
+        target=$PR_URL
+      else
+        target=$(pr_number_from_branch "$branch") || return 1
+      fi
+      [ -n "$target" ] || return 1
+      number=$(pr_number_from_target "$target") || return 1
+      view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      head=${view#*$'\t'}
+      [ "$state" != "$view" ] || return 1
+      case "$state" in
+        MERGED|merged) ;;
+        *) return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
+
   [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
+  ensure_commit_object "$number" "$head" "$provider" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
   unpushed_patches_are_in_pr_head "$head"

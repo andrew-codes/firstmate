@@ -690,6 +690,51 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# The generated GitHub-operations and PR-creation instruction text must switch
+# on the resolved project's forge= registry value (bin/fm-project-mode.sh
+# --forge is its one-owner reader), for both scout and ship briefs, and must
+# still default to github for an unregistered project so every existing
+# GitHub-forge workflow is unaffected.
+test_brief_forge_conditional_instructions() {
+  local home brief
+  home="$TMP_ROOT/forge-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- bb-proj [direct-PR forge=bitbucket] - bitbucket fixture (added 2026-08-01)
+- gh-proj [direct-PR] - github fixture (added 2026-08-01)
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-bb1 bb-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "bitbucket-forge ship brief should scaffold"
+  brief="$home/data/brief-forge-bb1/brief.md"
+  assert_grep "Use twg for Bitbucket operations" "$brief" \
+    "bitbucket-forge ship brief did not swap the GitHub-operations instruction"
+  assert_grep "open a pull request with \`twg bitbucket pull-requests create\`" "$brief" \
+    "bitbucket-forge direct-PR brief did not swap the PR-creation instruction"
+  assert_no_grep "gh-axi" "$brief" "bitbucket-forge ship brief still mentions gh-axi"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-gh1 gh-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "github-forge ship brief should scaffold"
+  brief="$home/data/brief-forge-gh1/brief.md"
+  assert_grep "Use gh-axi for GitHub operations" "$brief" \
+    "github-forge ship brief lost its GitHub-operations instruction"
+  assert_grep "push your branch and open a PR with \`gh-axi\`" "$brief" \
+    "github-forge direct-PR brief lost its PR-creation instruction"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-un1 never-registered --mode local-only >/dev/null 2>&1 \
+    || fail "unregistered project should still scaffold and default to github"
+  brief="$home/data/brief-forge-un1/brief.md"
+  assert_grep "Use gh-axi for GitHub operations" "$brief" \
+    "unregistered project did not default to the github forge"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-forge-bb2 bb-proj --scout >/dev/null 2>&1 \
+    || fail "bitbucket-forge scout brief should scaffold"
+  brief="$home/data/brief-forge-bb2/brief.md"
+  assert_grep "Use twg for Bitbucket operations" "$brief" \
+    "bitbucket-forge scout brief did not swap the GitHub-operations instruction"
+  pass "fm-brief.sh: GitHub/PR-creation instructions are forge-conditional and default to github"
+}
+
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
@@ -731,4 +776,5 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
+test_brief_forge_conditional_instructions
 test_scout_and_secondmate_scaffold
