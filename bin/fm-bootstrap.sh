@@ -7,6 +7,7 @@
 #          Silent = all good.
 #          Lines: "MISSING: <tool> (install: <command>)",
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
+#                 "NEEDS_BB_AUTH" (only when a registered project has forge=bitbucket),
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
@@ -166,6 +167,20 @@ case "${FM_BOOTSTRAP_NETWORK:-all}" in
 esac
 local_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != only ]; }
 network_phase() { [ "$FM_BOOTSTRAP_NETWORK_PHASE" != skip ]; }
+
+# True only when at least one registered project's data/projects.md bracket
+# annotation carries forge=bitbucket (bin/fm-project-mode.sh --forge is the
+# one-owner reader of that grammar). No registry, or a registry with no
+# Bitbucket-forge entries, means no Bitbucket auth check is owed.
+fm_any_registered_project_forge_bitbucket() {
+  local reg="$DATA/projects.md" name
+  [ -f "$reg" ] || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" --forge "$name" 2>/dev/null)" = bitbucket ] && return 0
+  done < <(awk '$1 == "-" && $2 != "" { print $2 }' "$reg")
+  return 1
+}
 
 network_mutation_authorized() {
   local expected=${FM_BOOTSTRAP_NETWORK_LOCK_PID:-} current
@@ -1210,6 +1225,17 @@ if network_phase; then
   __fm_timing_stamp=$(fm_timing_now_ms)
   gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
   fm_timing_record phase gh-auth "$__fm_timing_stamp"
+  if fm_any_registered_project_forge_bitbucket; then
+    __fm_timing_stamp=$(fm_timing_now_ms)
+    # --scope me needs no --workspace/--repo, so this is a pure auth probe.
+    # twg exits non-zero (observed 77) on its own AUTH_INVALID, not just when
+    # that literal code string is absent, so a real auth failure of any shape
+    # is caught rather than only the one error code seen during scouting.
+    twg bitbucket pull-requests query --scope me --limit 1 \
+      --output json --output-summary auto --agent-fields @compact >/dev/null 2>&1 \
+      || echo "NEEDS_BB_AUTH"
+    fm_timing_record phase bb-auth "$__fm_timing_stamp"
+  fi
 fi
 local_phase && detect_local_config
 

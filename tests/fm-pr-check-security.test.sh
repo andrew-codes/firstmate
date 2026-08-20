@@ -99,10 +99,21 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # Plain twg, reproducing the real CLI's contract for the one field this
+  # watcher reads: a JSON-ish envelope containing "state": "<ENUM>" and exit 0
+  # on success, non-zero with no stdout on any failure.
+  cat > "$fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TWG_LOG"
+[ "${FM_TEST_TWG_FAIL:-0}" = 0 ] || exit 1
+[ "${FM_TEST_TWG_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_TWG_SLEEP"
+printf '{"state":"%s"}\n' "${FM_TEST_TWG_STATE:-OPEN}"
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/twg"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/twg.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -250,6 +261,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TWG_LOG="$dir/twg.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -260,6 +272,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TWG_LOG="$dir/twg.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -353,6 +366,47 @@ INVALID_URLS=(
   'https://github.com/o/'\''"r"'\''/pull/1'
   "https://github.com/o/r/pull/1'"
   'https://github.com/o/r/pull/1"'
+  'https://bitbucket.org/o/r/pull-requests/1/'
+  ' https://bitbucket.org/o/r/pull-requests/1'
+  'https://bitbucket.org/o/r/pull-requests/1 '
+  'https://bitbucket.org/o /r/pull-requests/1'
+  $'https://bitbucket.org/o/r/pull-requests/1\t'
+  $'https://bitbucket.org/o/r/pull-requests/1\r'
+  $'https://bitbucket.org/o/r/pull-requests/1\nnext'
+  $'https://bitbucket.org/o/r/pull-requests/1\001'
+  'https://user@bitbucket.org/o/r/pull-requests/1'
+  'https://user:pass@bitbucket.org/o/r/pull-requests/1'
+  'https://bitbucket.org:443/o/r/pull-requests/1'
+  'https://bitbucket.org/o%2Fr/pull-requests/1'
+  'https://bitbucket.org//r/pull-requests/1'
+  'https://bitbucket.org/o//pull-requests/1'
+  'https://bitbucket.org/o/r//1'
+  'https://bitbucket.org/o/r/1'
+  'https://bitbucket.org/o/r/pull-requests/'
+  'https://bitbucket.org/o/./pull-requests/1'
+  'https://bitbucket.org/o/../pull-requests/1'
+  'https://bitbucket.org/o/r/pull-requests/+1'
+  'https://bitbucket.org/o/r/pull-requests/0'
+  'https://bitbucket.org/o/r/pull-requests/-1'
+  'https://bitbucket.org/o/r/pull-requests/01'
+  'https://bitbucket.org/o/r/pull-requests/1.0'
+  'https://bitbucket.org/o/r/issues/1'
+  'https://bitbucket.org/o/r/pull-requests/1/diff'
+  'https://bitbucket.org/o/r/pull-requests/1?q=x'
+  'https://bitbucket.org/o/r/pull-requests/1#f'
+  'http://bitbucket.org/o/r/pull-requests/1'
+  'ssh://bitbucket.org/o/r/pull-requests/1'
+  '//bitbucket.org/o/r/pull-requests/1'
+  'HTTPS://bitbucket.org/o/r/pull-requests/1'
+  'https://Bitbucket.org/o/r/pull-requests/1'
+  'https://bitbucket.org/o$/r/pull-requests/1'
+  'https://bitbucket.org/o/r`/pull-requests/1'
+  "https://bitbucket.org/o/r/pull-requests/1'"
+  'https://evilbitbucket.org/o/r/pull-requests/1'
+  'https://bitbucket.org.evil/o/r/pull-requests/1'
+  'https://bitbucket.org/pull-requests/1'
+  'https://bitbucket.org//pull-requests/1'
+  'https://bitbucket.org/o/r/pull-requests/1%0A'
 )
 
 # shellcheck disable=SC2016 # Literal shell syntax is task-ID test data.
@@ -423,6 +477,21 @@ EOF
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"
   [ "$FM_PR_PATH" = a/b ] || fail "parser returned wrong GitHub project path"
+  while IFS='|' read -r url owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected canonical Bitbucket URL"
+    [ "$FM_PR_PROVIDER" = bitbucket ] || fail "parser did not tag a Bitbucket pull request URL as bitbucket"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed canonical Bitbucket URL"
+    [ "$FM_PR_HOST" = bitbucket.org ] || fail "parser returned wrong Bitbucket host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong Bitbucket workspace/repository path"
+    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong Bitbucket workspace"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Bitbucket repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Bitbucket PR number"
+  done <<'EOF'
+https://bitbucket.org/a/b/pull-requests/1|a|b|1
+https://bitbucket.org/my-workspace/my_repo/pull-requests/42|my-workspace|my_repo|42
+https://bitbucket.org/team_one/repo-name.with.dots/pull-requests/123456|team_one|repo-name.with.dots|123456
+EOF
   for row in "${INVALID_URLS[@]}"; do
     ! fm_pr_url_parse "$row" || fail "parser accepted a rejected raw-byte URL class"
   done
@@ -717,6 +786,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_TWG_LOG="$dir/twg.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -2899,6 +2969,93 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_bitbucket_merge_watch() {
+  local dir state out rc url value notwg entry bindir name
+  dir=$(make_case bitbucket-merge-watch)
+  state="$dir/home/state"
+  url=https://bitbucket.org/example-workspace/example-repo/pull-requests/7
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a bitbucket "$url" bitbucket.org example-workspace/example-repo 7 "$POLL" \
+    || fail "could not prepare a Bitbucket poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Bitbucket poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Bitbucket poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "bitbucket
+$url
+bitbucket.org
+example-workspace/example-repo
+7" ] || fail "published Bitbucket sidecar bytes were not exact"
+
+  # Only an exact MERGED state wakes firstmate. Every other reading, including
+  # an unreadable pull request and a changed enum, stays silent.
+  for value in OPEN DECLINED SUPERSEDED '' not-a-state merged 'MERGED-but-not'; do
+    out=$(FM_TEST_TWG_STATE="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Bitbucket poll emitted for a non-merged state"
+  done
+  out=$(FM_TEST_TWG_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "Bitbucket poll did not emit exactly one merged line"
+  out=$(FM_TEST_TWG_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted after a twg failure"
+
+  # twg is addressed by workspace, repository, and PR number, never by the
+  # pull request URL, which twg would need a checkout to resolve.
+  grep -qF -- "bitbucket pull-requests get 7 --workspace example-workspace --repo example-repo" "$dir/twg.log" \
+    || fail "Bitbucket poll did not address twg by workspace, repo, and PR number"
+  ! grep -qF -- "$url" "$dir/twg.log" \
+    || fail "Bitbucket poll passed a pull request URL to twg"
+
+  # An absent CLI must produce no wake rather than a false merge. The whole
+  # search path is mirrored without twg, because a real twg anywhere on PATH
+  # would make this prove nothing.
+  notwg="$dir/notwg"
+  mkdir -p "$notwg"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = twg ] && continue
+      [ -e "$notwg/$name" ] || ln -s "$entry" "$notwg/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$notwg" command -v twg >/dev/null 2>&1 \
+    || fail "the twg-free search path still resolved twg"
+  out=$(FM_TEST_TWG_STATE=MERGED PATH="$notwg" bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Bitbucket poll emitted with twg absent from PATH"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' bitbucket "$url" elsewhere.example example-workspace/example-repo 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_TWG_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' bitbucket "$url" bitbucket.org example-workspace/other-repo 7 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_TWG_STATE=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Bitbucket poll emitted for a sidecar whose repository was swapped"
+
+  # Arming is where a missing CLI can still be reported, so it refuses there.
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notwg" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Bitbucket watch succeeded with twg absent"
+  case "$out" in
+    *"requires twg on PATH"*) ;;
+    *) fail "arming a Bitbucket watch with twg absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Bitbucket arming left a poll armed"
+
+  pass "Bitbucket pull requests are followed and never wake falsely"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3356,8 +3513,27 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_bitbucket_merged_poll_retires() {
+  local dir state url rc
+  dir=$(make_case bitbucket-merged-retirement)
+  state="$dir/home/state"
+  url=https://bitbucket.org/example-workspace/example-repo/pull-requests/17
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  set +e
+  FM_TEST_TWG_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Bitbucket merged retirement watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in check:*task-a.check.sh:*merged) ;; *) fail "Bitbucket merged wake was missing" ;; esac
+  assert_poll_absent "$state" task-a
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "Bitbucket retirement removed canonical metadata"
+  pass "GitHub, GitLab, and Bitbucket exact merged results share one retirement path"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
+test_bitbucket_merge_watch
 test_merged_poll_retires_once
 test_persistent_secondmate_retirement_is_poll_only
 test_retirement_crash_recovery
@@ -3365,6 +3541,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_bitbucket_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

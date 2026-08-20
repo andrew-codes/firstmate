@@ -4,8 +4,9 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI: gh for GitHub, glab for
+# GitLab, and twg for Bitbucket Cloud, so an upstream checkout needs no extra
+# tooling to follow any of them.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -104,6 +105,32 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  bitbucket)
+    [ "$host" = bitbucket.org ] || exit 0
+    workspace=${path%%/*}
+    repo=${path#*/}
+    [ "${#workspace}" -ge 1 ] && [ "${#workspace}" -le 100 ] || exit 0
+    case "$workspace" in
+      *[!A-Za-z0-9_-]*) exit 0 ;;
+    esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in
+      .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
+    esac
+    [ "$url" = "https://bitbucket.org/$workspace/$repo/pull-requests/$number" ] || exit 0
+    # twg has no gh-style scalar field selector, so the state enum is read out
+    # of its JSON/YAML-envelope stdout by literal token match rather than by
+    # a JSON parser this watcher does not require. Bitbucket's PR state
+    # vocabulary is OPEN/MERGED/DECLINED/SUPERSEDED; only an exact MERGED wakes.
+    raw=$(twg bitbucket pull-requests get "$number" --workspace "$workspace" --repo "$repo" \
+      --output json --output-summary inline --agent-fields state 2>/dev/null) || exit 0
+    # The quoted value is extracted whole, then compared exactly, so a state
+    # string that merely starts with "MERGED" (e.g. a future enum addition)
+    # cannot be mistaken for the closed set this poll acts on.
+    state=$(printf '%s\n' "$raw" | grep -oE '"state"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 \
+      | sed -n 's/.*:[[:space:]]*"\([^"]*\)"$/\1/p') || exit 0
+    [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

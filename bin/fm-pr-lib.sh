@@ -158,13 +158,17 @@ fm_pr_gitlab_path_valid() {
 
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# unchanged, and GitLab and Bitbucket Cloud each get their own host and
+# namespace rules rather than a loosened GitHub rule.
 #
-# FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# FM_PR_OWNER and FM_PR_REPO are additionally set for github and bitbucket
+# because bin/fm-pr-merge.sh addresses both by owner/repository (Bitbucket
+# calls it workspace/repository, the same two-segment shape). A gitlab URL
+# leaves them empty; teaching the merge path about GitLab is a separate
+# change, and until then it refuses a GitLab URL rather than merging anything.
+# Bitbucket Cloud is the only Bitbucket variant recognized here: self-hosted
+# Bitbucket Server/Data Center uses a different project/repo model that this
+# pattern does not address.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -184,6 +188,25 @@ fm_pr_url_parse() {
     FM_PR_HOST=github.com
     FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[1]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[2]}
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Bitbucket Cloud workspace and repository slugs are lowercase-or-mixed
+  # alphanumerics plus hyphens/underscores (workspace) or hyphens/underscores/
+  # dots (repository); bounded the same as the GitHub segments above rather
+  # than left unbounded.
+  pattern='^https://bitbucket\.org/([A-Za-z0-9_-]{1,100})/([A-Za-z0-9._-]{1,100})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    # Consumed by bin/fm-pr-merge.sh, which addresses Bitbucket by workspace/repository.
     # shellcheck disable=SC2034
     FM_PR_OWNER=${BASH_REMATCH[1]}
     # shellcheck disable=SC2034
