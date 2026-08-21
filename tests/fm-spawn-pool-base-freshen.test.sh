@@ -51,7 +51,8 @@ make_case() {
 
   git init --quiet -b "$default" "$project"
   printf 'base\n' > "$project/README.md"
-  git -C "$project" add README.md
+  printf 'firstmate.yml\n' > "$project/.gitignore"
+  git -C "$project" add README.md .gitignore
   git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
   git clone --quiet --bare "$project" "$origin"
   git -C "$project" remote add origin "file://$origin"
@@ -206,6 +207,28 @@ test_dirty_pool_refuses_without_discarding_work() {
   pass "a dirty pooled worktree is refused without discarding its local work"
 }
 
+test_pooled_worktree_sweeps_leftover_gitignored_firstmate_yml() {
+  local rec id out status marker
+  id='pool-tampered-firstmate-r6'
+  rec=$(make_case tampered-firstmate "$id")
+  read_case_record "$rec"
+  marker="$POOL_DIR/tampered.marker"
+
+  cat > "$POOL_DIR/firstmate.yml" <<EOF
+post_create: touch $marker
+EOF
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still succeed after sweeping a leftover gitignored firstmate.yml"
+  [ -f "$marker" ] && fail "spawn ran post_create from a gitignored firstmate.yml left over in the pool"
+  [ -f "$POOL_DIR/firstmate.yml" ] && fail "spawn left a gitignored firstmate.yml in the pooled worktree instead of sweeping it"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed tampered-firstmate spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a leftover gitignored firstmate.yml in a pooled worktree is swept before spawn reads it"
+}
+
 test_unresolved_remote_default_refuses_pool() {
   local rec id out status before
   id='pool-unresolved-default-r5'
@@ -233,5 +256,6 @@ test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
+test_pooled_worktree_sweeps_leftover_gitignored_firstmate_yml
 
 echo "# all fm-spawn-pool-base-freshen tests passed"
