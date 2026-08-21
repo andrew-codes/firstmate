@@ -1774,6 +1774,17 @@ freshen_spawn_worktree_base() {  # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  # git status --porcelain above never reports gitignored paths, so a pooled
+  # worktree can carry a gitignored firstmate.yml (or a stale copy_files
+  # target) left over from an earlier task straight through that clean check
+  # and this hard reset - reset --hard only touches tracked files. Remove
+  # every ignored path now so the firstmate.yml read right after this call
+  # can only ever see the target commit's own tracked copy, matching the
+  # trusted-default-branch boundary the caller's comment documents.
+  if ! git -C "$worktree" clean -fdX --quiet; then
+    echo "error: could not remove ignored files from pooled worktree '$worktree'; refusing to launch from a potentially tampered base" >&2
+    return 1
+  fi
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>

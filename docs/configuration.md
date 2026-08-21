@@ -154,7 +154,8 @@ Each `copy_files` entry must be a plain relative filename with no path separator
 Malformed content in either key is reported as a `warning:` on spawn's stderr and that key is skipped rather than guessed at; it never blocks the spawn by itself.
 
 `bin/fm-worktree-config-lib.sh` is the one parser and states the exact recognized shape in its header; it is deliberately not a general YAML parser.
-It is read only once, immediately after the worktree is freshly fetched and hard-reset to the project's own default branch and before any crewmate-controlled commit can exist in it - the same trusted, pinned-to-a-fresh-fetch boundary the `no-mistakes` gate itself uses for its own trusted repo config (see that project's `AGENTS.md` "Repo Config Trust Boundary").
+It is read only once, immediately after the worktree is freshly fetched, hard-reset to the project's own default branch, and swept of every gitignored path left over from a prior use of that pooled worktree, and before any crewmate-controlled commit can exist in it - the same trusted, pinned-to-a-fresh-fetch boundary the `no-mistakes` gate itself uses for its own trusted repo config (see that project's `AGENTS.md` "Repo Config Trust Boundary").
+The gitignored sweep matters because a hard reset alone only restores tracked files; a gitignored `firstmate.yml` (or a stale `copy_files` target) surviving from an earlier task in that pooled worktree would otherwise be read as if it were the trusted default-branch copy.
 A task's own later commits on its own branch can therefore never cause this file to be re-read for that task.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
