@@ -1,0 +1,33 @@
+== args: -r other -> rc=1
+error: extra merge arguments must not override the workspace, repository, or pull request
+twg merge calls: 0
+== args: -r=other -> rc=1
+error: extra merge arguments must not override the workspace, repository, or pull request
+twg merge calls: 0
+== args: --pull-request 999 -> rc=1
+error: extra merge arguments must not override the workspace or pull request
+twg merge calls: 0
+== args: --pull-request=999 -> rc=1
+error: extra merge arguments must not override the workspace or pull request
+twg merge calls: 0
+== args: -w other -> rc=1
+error: extra merge arguments must not override the workspace, repository, or pull request
+twg merge calls: 0
+== args: -rw x -> rc=1
+error: extra merge arguments must not override the workspace, repository, or pull request
+twg merge calls: 0
+== args: --repo x -> rc=1
+error: extra merge arguments must not override the repository
+twg merge calls: 0
+== args: --wait -> rc=0
+armed: state/task-a.check.sh
+verified: https://bitbucket.org/ws/repo/pull-requests/12 is open and mergeable, with a clean build status at head abc123def456
+twg merge calls: 1
+== args: --merge-strategy=fast_forward -> rc=0
+armed: state/task-a.check.sh
+verified: https://bitbucket.org/ws/repo/pull-requests/12 is open and mergeable, with a clean build status at head abc123def456
+twg merge calls: 1
+== args: --wait-timeout 5 -> rc=0
+armed: state/task-a.check.sh
+verified: https://bitbucket.org/ws/repo/pull-requests/12 is open and mergeable, with a clean build status at head abc123def456
+twg merge calls: 1
