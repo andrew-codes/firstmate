@@ -1,0 +1,4 @@
+ok - the parser tags valid Bitbucket Cloud pull-request URLs and refuses malformed ones
+ok - Bitbucket pull requests are followed and never wake falsely
+ok - the Bitbucket merge path refuses an unopen, blocked, or unclean pull request and reports why
+ok - a Bitbucket merge confirms the landed state, forwards extra flags, and refuses unwaived protected flags
