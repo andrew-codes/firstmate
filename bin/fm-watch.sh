@@ -3990,6 +3990,12 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Opt-in Jira status reconciliation (bin/fm-jira-transition.sh): a no-op
+    # unless config/jira-status-transitions exists, detached so Jira latency never
+    # delays supervision, and a failure only warns.
+    if [ -f "$CONFIG/jira-status-transitions" ]; then
+      FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-jira-transition.sh" reconcile >/dev/null 2>&1 </dev/null &
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,

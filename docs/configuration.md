@@ -11,6 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Jira work item status following the real state of the work | [Jira status transitions](#jira-status-transitions-configjira-status-transitions) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -585,6 +586,40 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 ## Fleet activity ledger (config/fleet-ledger)
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
+
+## Jira status transitions (config/jira-status-transitions)
+
+The optional local, gitignored `config/jira-status-transitions` keeps a Jira work item's status in step with the task that carries it.
+Without the file nothing is read or written, and a project not listed in it is never touched.
+
+Each non-comment line enables one project, named as its clone directory under `projects/`, followed by space-separated settings:
+
+```text
+rovo-chat-desktop site=product-fabric max-behind=20 ignore-commenters=iap-pipelines-bot
+```
+
+- `site=<site>` is required and is passed as `twg-axi -s <site>`.
+- `max-behind=<n>` optionally bounds how many commits the pull request may trail its destination branch; without it the count is not checked.
+- `ignore-commenters=<names>` optionally lists comma-separated comment authors, such as pipeline bots, whose threads do not need a reply.
+
+The work item key is the uppercase `[A-Z]+-[0-9]+` in the task's recorded ship branch, such as `fm/CDE-4240-...`.
+A branch or pull request title carrying `NOISSUE`, and a branch with no key, has no work item and is skipped.
+
+Only the status field is written, to one of `In Progress`, `Review`, or `Done`, and only along a transition the workflow offers from the item's current status.
+A call is a no-op when the item is already in the target, and an item whose status category is Done is never moved.
+The last applied target is cached per task in `state/<id>.jira-status`, so repeated calls make no Jira call.
+Every failure is a warning on stderr and never blocks a spawn, a merge, or supervision.
+
+The wiring points are:
+
+- A ship's spawn or relaunch moves the item to `In Progress` (`bin/fm-spawn.sh`).
+- Recording a pull request (`bin/fm-pr-check.sh`) and every heartbeat (`bin/fm-watch.sh`) reconcile readiness: a ready pull request moves the item to `Review`, and a pull request that is not ready, including any draft, moves it back to `In Progress`.
+- A recorded merge moves the item to `Done` (`bin/fm-merge-outcome-lib.sh`).
+
+A pull request is ready only when it is open and not a draft, every reported build status is successful, every comment thread started by someone other than the author has a reply or is resolved, no pull request task remains, the commits-behind count is within `max-behind`, and the last no-mistakes run for the head finished passed.
+Readiness is read from Bitbucket through the same `twg bb pull-requests get` read as `bin/fm-pr-merge.sh`, and a reading that cannot be completed leaves the item unchanged.
+A draft that would otherwise be ready is only reported; this feature never publishes a draft.
+`bin/fm-jira-transition.sh`'s header owns the commands, including `ready <task-id>` for a read-only verdict.
 
 ## Firstmate role (config/firstmate-role)
 

@@ -6688,4 +6688,8 @@ SPAWN_ACCOUNT=
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true
+# Opt-in Jira status follow-through (docs/configuration.md "Jira status
+# transitions"): a launched or relaunched ship's work item is In Progress. It is a
+# no-op for any project not enabled, and a failure only warns.
+[ "$KIND" != ship ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-jira-transition.sh" set "$ID" "In Progress" >&2 || true
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

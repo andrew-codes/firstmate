@@ -309,4 +309,7 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
+# Opt-in Jira status follow-through: the newly recorded pull request is evaluated
+# for readiness (bin/fm-jira-transition.sh); a failure only warns.
+FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-jira-transition.sh" reconcile "$ID" >&2 || true
 printf 'armed: state/%s.check.sh\n' "$ID"
