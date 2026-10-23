@@ -1,6 +1,10 @@
 # Projection for fm-contributions.sh; its header owns the record contract.
+# A Bitbucket pull request is observed for unanswered review threads only. It is
+# never a coverage row: known() leaves it out and projected() never sees it.
+def bitbucket_url:
+  type == "string" and test("^https://bitbucket[.]org/[A-Za-z0-9._/-]+/pull-requests/[1-9][0-9]*$");
 def supported_url:
-  type == "string" and test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$");
+  type == "string" and (test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$") or bitbucket_url);
 # Preserve legacy ownership and saved-record compatibility, including lookalike
 # hosts accepted by the historical regex; supported_url alone gates observation.
 # tests/fm-contributions.test.sh covers fresh, retained and mixed saved ownership.
@@ -11,7 +15,7 @@ def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
 def valid_record:
   try (.schema == "fm-contributions.v1" and (.task | type == "string")
   and (.records | type == "array")
-  and all(.records[]; (.url | canonical_url) and (.kind == "pr" or .kind == "issue")
+  and all(.records[]; (.url | canonical_url or bitbucket_url) and (.kind == "pr" or .kind == "issue")
     and (.pending | type == "array") and (.seen | type == "array")
     and all(.pending[]; (.token | type == "string" and length > 0))
     and all(.seen[]; type == "string")
@@ -24,12 +28,13 @@ def valid_record:
       and (.reason | type == "string" and length > 0) and (.at | fromdateiso8601 | type == "number")))
     and (.verdict == null or (.verdict | (.head | sha) and (.source | type == "string")
       and (.actor | IN("captain","fleet","maintainer","nobody")) and (.summary | type == "string")))
-    and (.observation == null or (.kind as $kind | .observation |
+    and (.observation == null or (.url as $url | .kind as $kind | .observation |
       (.state | IN("open","closed","merged")) and (.checks | type == "array")
       and (.reviews | type == "array") and (.events | type == "array")
       and all(.checks[]; (.name | type == "string" and length > 0)
         and (.status | type == "string") and (.conclusion == null or (.conclusion | type == "string")))
-      and (if $kind == "pr" then (.head | sha) and (.draft | type == "boolean")
+      and (if $kind == "pr" and ($url | bitbucket_url) then (.threads | type == "array")
+        elif $kind == "pr" then (.head | sha) and (.draft | type == "boolean")
         and (.mergeable | IN("mergeable","conflicting","unknown")) and (.can_merge | type == "boolean")
         and (.review_decision | IN("","APPROVED","CHANGES_REQUESTED","REVIEW_REQUIRED"))
         else (.ready | type == "boolean") end))))) catch false;
@@ -58,9 +63,18 @@ def known($input; $saved):
      | select(.pr.url | canonical_url) | {task:.id,url:.pr.url}]
    + [($input.backlog.records // [])[] | select(.structured == true) as $task
       | ($task.links // [])[] | select(canonical_url) | {task:$task.id,url:.}]
-   + [$saved[] | .task as $task | .records[] | {task:$task,url}])
+   + [$saved[] | .task as $task | .records[] | select(.url | bitbucket_url | not) | {task:$task,url}])
   | unique_by([.task,.url])
   # A retired record ends that task's ownership even while a backlog link remains.
+  | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
+  | map(select(. as $pair | any($retired[]; . == $pair) | not));
+# Bitbucket pull requests a fleet task recorded as its pr=, plus those already
+# observed. Read only when review-thread tracking is on.
+def bitbucket_known($input; $saved):
+  ([($input.tasks // [])[] | select(.kind != "secondmate")
+     | select(.pr.url | bitbucket_url) | {task:.id,url:.pr.url}]
+   + [$saved[] | .task as $task | .records[] | select(.url | bitbucket_url) | {task:$task,url}])
+  | unique_by([.task,.url])
   | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
   | map(select(. as $pair | any($retired[]; . == $pair) | not));
 def latest_checks:
