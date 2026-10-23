@@ -111,6 +111,15 @@
 # no review-thread read, tracks no threads and raises no "unanswered" signal,
 # and records carry no threads[] entry. arm copies a set value into the
 # generated check, as it does FM_CONTRIBUTIONS_BUDGET, so the watcher honors it.
+# When the variable is unset or empty, the optional local config file
+# config/contributions-reply-age (first non-comment line, positive integer
+# seconds) supplies the value, so every arm and every poll sees the same setting
+# whoever runs it and a re-arm never loses it. The variable wins when set. An
+# invalid file value is refused naming the file; with neither, nothing changes.
+# FM_CONTRIBUTIONS_IGNORE_COMMENTERS, or else config/contributions-ignore-commenters,
+# holds comma-separated account names, such as a pipeline bot, whose comments and
+# reviews are never tracked as unanswered threads; they still raise their ordinary
+# one-shot wake.
 # With it set, acknowledging a signal never ends tracking of its thread. On an
 # open pull request, each maintainer inline review comment and each maintainer
 # review in state CHANGES_REQUESTED is an unanswered thread until the
@@ -167,6 +176,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -182,13 +192,26 @@ command -v jq >/dev/null 2>&1 || fail 'jq is required to measure contribution co
 NOW=${FM_CONTRIBUTIONS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid observation clock'
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
+# config_value <file> prints the first non-blank, non-comment line of an optional
+# config file, trimmed; an absent file prints nothing.
+config_value() {
+  [ -f "$CONFIG/$1" ] || return 0
+  sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$CONFIG/$1" | sed -n '/./{p;q;}'
+}
 REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
+REPLY_AGE_ERR='invalid reply age'
+if [ -z "$REPLY_AGE" ]; then
+  REPLY_AGE=$(config_value contributions-reply-age)
+  REPLY_AGE_ERR="invalid reply age '$REPLY_AGE' in config/contributions-reply-age (expected positive integer seconds)"
+fi
+IGNORE_COMMENTERS=${FM_CONTRIBUTIONS_IGNORE_COMMENTERS:-}
+[ -n "$IGNORE_COMMENTERS" ] || IGNORE_COMMENTERS=$(config_value contributions-ignore-commenters)
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 TRACK_THREADS=false
 if [ -n "$REPLY_AGE" ]; then
-  case "$REPLY_AGE" in *[!0-9]*) fail 'invalid reply age' ;; esac
-  [ -n "${REPLY_AGE#"${REPLY_AGE%%[!0]*}"}" ] || fail 'invalid reply age'
+  case "$REPLY_AGE" in *[!0-9]*) fail "$REPLY_AGE_ERR" ;; esac
+  [ -n "${REPLY_AGE#"${REPLY_AGE%%[!0]*}"}" ] || fail "$REPLY_AGE_ERR"
   TRACK_THREADS=true
 else
   REPLY_AGE=0
@@ -424,7 +447,7 @@ observe_bitbucket() { # canonical Bitbucket URL -> normalized JSON
       and (.author | type == "object") and (._comments | type == "array")
       and ((.comment_count | type != "number") or (._comments | length) >= .comment_count)' "$TMP/core.json" >/dev/null \
     || unobserved 'pull request read returned an unexpected or incomplete shape' || return 1
-  jq --arg url "$url" --arg ignore "${FM_CONTRIBUTIONS_IGNORE_COMMENTERS:-}" '
+  jq --arg url "$url" --arg ignore "$IGNORE_COMMENTERS" '
     def utc: sub("[.][0-9]+"; "") | sub("[+]00:00$"; "Z");
     def who: .uuid // .display_name // "";
     (if type == "object" and has("data") then .data else . end)
@@ -501,8 +524,9 @@ observe() { # canonical GitHub or Bitbucket URL -> normalized JSON
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" --argjson track "$TRACK_THREADS" '
-      $core[0] as $c
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" --argjson track "$TRACK_THREADS" --arg ignore "$IGNORE_COMMENTERS" '
+      ($ignore | split(",") | map(gsub("^\\s+|\\s+$"; "") | select(. != ""))) as $ignored
+      | $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | ($comments[0] | add // []) as $issue_comments
       | ($inline[0] | add // []) as $inline_comments
@@ -529,7 +553,8 @@ observe() { # canonical GitHub or Bitbucket URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}
                  + (if $track then {at:$at,
                    # A resolved inline thread counts as answered.
-                   unanswered:(if ._signal == "review-comment" then
+                   unanswered:(if ($ignored | index($e.user.login)) != null then false
+                     elif ._signal == "review-comment" then
                        ($resolved | index($root)) == null
                        and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
                      elif ._signal == "review" and .state == "CHANGES_REQUESTED" and (.body // "") != "" then

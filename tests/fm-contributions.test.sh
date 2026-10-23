@@ -1848,8 +1848,61 @@ test_arm_plumbs_the_reply_age_into_the_check_shim() {
   pass 'arm copies a configured reply age into the generated check'
 }
 
+test_reply_age_config_file() {
+  local home out
+  home=$(unanswered_home reply-age-file)
+  wrap_forge "$home"
+  poll_plain() { with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll; }
+  # Absent file and no variable: unchanged, nothing tracked.
+  out=$(poll_plain 2026-09-16T08:01:00Z) || fail 'first poll failed'
+  ack_pending "$home"
+  out=$(poll_plain 2026-09-16T09:30:00Z) || fail 'poll without a file failed'
+  [ -z "$out" ] || fail "no file and no variable still raised a thread: $out"
+  ! grep -Fq 'api graphql' "$home/forge/calls" || fail 'no file and no variable read review threads'
+  # The file alone turns the reminder on.
+  printf '# reply age\n3600\n' > "$home/config/contributions-reply-age"
+  out=$(poll_plain 2026-09-16T09:30:00Z) || fail 'poll with a file failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 1h$' \
+    || fail "the config file did not set the reply age: $out"
+  # The variable wins over the file.
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE=86400 FM_CONTRIBUTIONS_NOW=2026-09-16T11:00:00Z \
+    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll with variable and file failed'
+  [ -z "$out" ] || fail "the variable did not take precedence over the file: $out"
+  # A re-arm by a caller with no variable keeps the file's value.
+  with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE "$ROOT/bin/fm-contributions.sh" arm >/dev/null || fail 're-arm failed'
+  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_REPLY_AGE FM_CONTRIBUTIONS_NOW=2026-09-16T11:00:00Z bash "$home/state/contributions.check.sh") \
+    || fail 'check shim after re-arm failed'
+  printf '%s\n' "$out" | grep -Eq 'unanswered https://github.com/o/r/pull/8#discussion_r31 3h$' \
+    || fail "a re-arm lost the file's reply age: $out"
+  # An invalid file value is refused, naming the file.
+  for bad in soon -5 1.5 0; do
+    printf '%s\n' "$bad" > "$home/config/contributions-reply-age"
+    out=$(poll_plain 2026-09-16T11:00:00Z 2>&1) && fail "the file value '$bad' was accepted"
+    printf '%s\n' "$out" | grep -Fq 'config/contributions-reply-age' || fail "the refusal for '$bad' did not name the file: $out"
+  done
+  pass 'the reply age is read from config/contributions-reply-age, the variable wins, re-arm keeps it, invalid is refused'
+}
+
+test_ignored_commenters_are_not_tracked() {
+  local home out
+  home=$(unanswered_home ignore-commenters)
+  jq '.[0].user.login = "iap-pipelines-bot"' "$home/forge/inline.json" > "$home/forge/inline.tmp" \
+    && mv "$home/forge/inline.tmp" "$home/forge/inline.json"
+  printf '3600\n' > "$home/config/contributions-reply-age"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:01:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'first poll failed'
+  ack_pending "$home"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:30:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed'
+  printf '%s\n' "$out" | grep -Fq 'unanswered' || fail "a non-ignored commenter was not tracked: $out"
+  printf '# bots\nsome-other,iap-pipelines-bot\n' > "$home/config/contributions-ignore-commenters"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T11:00:00Z "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll with ignore file failed'
+  [ -z "$out" ] || fail "an ignored commenter's thread was raised: $out"
+  jq -e '.records[0] | (.threads | length) == 0' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'an ignored commenter kept a tracked thread'
+  pass 'commenters in config/contributions-ignore-commenters are never raised as unanswered'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_reply_age_config_file test_ignored_commenters_are_not_tracked test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
