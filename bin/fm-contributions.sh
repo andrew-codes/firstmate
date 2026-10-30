@@ -17,7 +17,9 @@
 # Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # Only canonical PR and issue URLs on the exact github.com host are supported;
-# other accepted URLs remain visibly unmeasured.
+# other accepted URLs remain visibly unmeasured. A Bitbucket Cloud pull request
+# is the one exception, described with the reply age below, and is never a
+# coverage row.
 # poll skips unsupported URLs without forge calls, unavailable output, wakes or
 # new error stamps, and clears their legacy errors without changing observation,
 # timestamps or ownership evidence.
@@ -109,6 +111,15 @@
 # no review-thread read, tracks no threads and raises no "unanswered" signal,
 # and records carry no threads[] entry. arm copies a set value into the
 # generated check, as it does FM_CONTRIBUTIONS_BUDGET, so the watcher honors it.
+# When the variable is unset or empty, the optional local config file
+# config/contributions-reply-age (first non-comment line, positive integer
+# seconds) supplies the value, so every arm and every poll sees the same setting
+# whoever runs it and a re-arm never loses it. The variable wins when set. An
+# invalid file value is refused naming the file; with neither, nothing changes.
+# FM_CONTRIBUTIONS_IGNORE_COMMENTERS, or else config/contributions-ignore-commenters,
+# holds comma-separated account names, such as a pipeline bot, whose comments and
+# reviews are never tracked as unanswered threads; they still raise their ordinary
+# one-shot wake.
 # With it set, acknowledging a signal never ends tracking of its thread. On an
 # open pull request, each maintainer inline review comment and each maintainer
 # review in state CHANGES_REQUESTED is an unanswered thread until the
@@ -131,6 +142,28 @@
 # answers; a reply from another account does not. Resolution is read from the
 # forge's review threads. Issue records and the author's own comments are never
 # tracked.
+#
+# With the same setting, a Bitbucket Cloud pull request that a fleet task
+# recorded as its pr= is observed for unanswered review threads and nothing
+# else; with it unset, such a pull request is neither read nor recorded. One
+# `twg bb pull-requests get <number> -w <workspace> -r <repo> --comments`
+# read, the one bin/fm-jira-transition.sh makes, replaces the GitHub waves, so
+# a pull request needs one read, bounded like any other. The read is refused
+# as unavailable if it lists fewer comments than the pull request counts. Any
+# comment by someone other than the pull request author is a thread comment
+# until the author comments later in its thread or the thread's root comment
+# is resolved. A comment from an app or AI-agent account, such as a code review
+# bot, counts only when anchored to a file and line; its general summary does
+# not. The comma-separated display names or nicknames in
+# FM_CONTRIBUTIONS_IGNORE_COMMENTERS (such as a pipeline bot) are skipped.
+# Nothing raises on arrival: such a comment is raised, with the same
+# "unanswered" wake and re-raise cadence, once it is a reply age old, and
+# ack, retire and the record keep working as for GitHub. A merged, declined
+# or superseded pull request is final. The record carries the observation's
+# state and unanswered threads alone, so these pull requests never become
+# coverage rows, counts or unmeasured entries. arm copies the ignore setting
+# into the generated check, as it does the reply age, and arm --if-owned
+# counts a Bitbucket pull request only while the reply age is set.
 # Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
 # symlinks and publish by rename. No forge writes are performed.
@@ -145,6 +178,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -160,13 +194,26 @@ command -v jq >/dev/null 2>&1 || fail 'jq is required to measure contribution co
 NOW=${FM_CONTRIBUTIONS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid observation clock'
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
+# config_value <file> prints the first non-blank, non-comment line of an optional
+# config file, trimmed; an absent file prints nothing.
+config_value() {
+  [ -f "$CONFIG/$1" ] || return 0
+  sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$CONFIG/$1" | sed -n '/./{p;q;}'
+}
 REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
+REPLY_AGE_ERR='invalid reply age'
+if [ -z "$REPLY_AGE" ]; then
+  REPLY_AGE=$(config_value contributions-reply-age)
+  REPLY_AGE_ERR="invalid reply age '$REPLY_AGE' in config/contributions-reply-age (expected positive integer seconds)"
+fi
+IGNORE_COMMENTERS=${FM_CONTRIBUTIONS_IGNORE_COMMENTERS:-}
+[ -n "$IGNORE_COMMENTERS" ] || IGNORE_COMMENTERS=$(config_value contributions-ignore-commenters)
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 TRACK_THREADS=false
 if [ -n "$REPLY_AGE" ]; then
-  case "$REPLY_AGE" in *[!0-9]*) fail 'invalid reply age' ;; esac
-  [ -n "${REPLY_AGE#"${REPLY_AGE%%[!0]*}"}" ] || fail 'invalid reply age'
+  case "$REPLY_AGE" in *[!0-9]*) fail "$REPLY_AGE_ERR" ;; esac
+  [ -n "${REPLY_AGE#"${REPLY_AGE%%[!0]*}"}" ] || fail "$REPLY_AGE_ERR"
   TRACK_THREADS=true
 else
   REPLY_AGE=0
@@ -332,7 +379,7 @@ forge() {
     fi
     rc=0
     fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+      "${FORGE_BIN:-gh}" "$@" > "$out" 2> "$forge_err" || rc=$?
     if [ "$rc" -eq 0 ]; then
       cat "$out"
       rm -f -- "$out"
@@ -376,9 +423,74 @@ wait_forges() { # background forge pids from one independent read wave
   return "$rc"
 }
 
-observe() { # canonical GitHub URL -> normalized JSON
+observation_valid() { # canonical URL, pull|issues
+  jq_lib -ne --arg url "$1" --arg kind "$2" --slurpfile observed "$TMP/observation.json" '
+    {schema:"fm-contributions.v1",task:"observation",records:[{url:$url,
+      kind:(if $kind == "pull" then "pr" else "issue" end),pending:[],seen:[],observation:$observed[0]}]}
+    | valid_record' >/dev/null || unobserved 'observation failed validation'
+}
+
+# One twg read of a Bitbucket pull request, comments included, reduced to the
+# review threads the author has not answered. Nothing else is measured: the
+# observation carries no checks, reviews or mergeability, and no maintainer
+# signal, so a thread is only ever raised once it is a reply age old.
+observe_bitbucket() { # canonical Bitbucket URL -> normalized JSON
+  local url=$1
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = bitbucket ] \
+    || unobserved 'pull request URL is not a Bitbucket pull request' || return 1
+  command -v twg >/dev/null 2>&1 || unobserved 'twg is not on PATH' || return 1
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/why"
+  BUDGET_EXHAUSTED=0
+  FORGE_ERR="$TMP/core.err" FORGE_BIN=twg forge bb pull-requests get "$FM_PR_NUMBER" \
+    -w "${FM_PR_PATH%%/*}" -r "${FM_PR_PATH#*/}" --comments -o json --output-summary none > "$TMP/core.json" || return 1
+  jq -e '(if type == "object" and has("data") then .data else . end)
+    | (if type == "array" then .[0] else . end)
+    | type == "object" and (.state | IN("OPEN","MERGED","DECLINED","SUPERSEDED"))
+      and (.author | type == "object") and (._comments | type == "array")
+      and ((.comment_count | type != "number") or (._comments | length) >= .comment_count)' "$TMP/core.json" >/dev/null \
+    || unobserved 'pull request read returned an unexpected or incomplete shape' || return 1
+  jq --arg url "$url" --arg ignore "$IGNORE_COMMENTERS" '
+    def utc: sub("[.][0-9]+"; "") | sub("[+]00:00$"; "Z");
+    def who: .uuid // .display_name // "";
+    (if type == "object" and has("data") then .data else . end)
+    | (if type == "array" then .[0] else . end) as $p
+    | ($ignore | split(",") | map(select(. != ""))) as $skip
+    | ($p.author | who) as $author
+    | [$p._comments[] | select(((.deleted // false) or (.pending // false)) | not)] as $live
+    | ($live | INDEX(.id | tostring)) as $by
+    | def top($c): if $c.parent == null then $c.id
+        else ($by[($c.parent.id | tostring)] as $up | if $up == null then $c.parent.id else top($up) end) end;
+    # An unanswered comment is one the author and the ignored names did not
+    # write, in a thread nobody resolved, with no later author reply. An app or
+    # AI-agent account counts only through a comment anchored to a file and line,
+    # so its general summary and notices stay out.
+    def anchored: (.inline | type == "object") and (.inline.path // "") != ""
+      and ((.inline.to // .inline.from) != null);
+    def actionable: ((.user.type == "app_user") or (.user.ai_agent // false)) as $bot
+      | if $bot then anchored else true end;
+    {state:(if $p.state == "OPEN" then "open" elif $p.state == "MERGED" then "merged" else "closed" end),
+     head:null,checks:[],reviews:[],events:[],
+     threads:[$live[] as $c
+       | select(($c.user | who) != $author and ($c | actionable)
+         and ($skip | index($c.user.display_name // "")) == null and ($skip | index($c.user.nickname // "")) == null)
+       | top($c) as $root
+       | select(($by[($root | tostring)].resolution // null) == null)
+       | select(any($live[]; (.user | who) == $author and top(.) == $root and .id > $c.id) | not)
+       | {token:("review-comment:" + ($c.id | tostring) + ":" + ($c.updated_on // "")),type:"review-comment",
+          source:($c.links.html.href // ($url + "#comment-" + ($c.id | tostring))),
+          author:($c.user.display_name // $c.user.nickname // "unknown"),at:($c.created_on | utc),unanswered:true}]}' \
+    "$TMP/core.json" > "$TMP/observation.json" \
+    || unobserved 'observation could not be assembled' || return 1
+  observation_valid "$url" pull
+}
+
+observe() { # canonical GitHub or Bitbucket URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
-  case "$url" in https://github.com/*) ;; *) return 1 ;; esac
+  case "$url" in
+    https://bitbucket.org/*) observe_bitbucket "$url"; return ;;
+    https://github.com/*) ;;
+    *) return 1 ;;
+  esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/why"
@@ -420,8 +532,9 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || unobserved 'head changed during observation' || return 1
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" --argjson track "$TRACK_THREADS" '
-      $core[0] as $c
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" --argjson track "$TRACK_THREADS" --arg ignore "$IGNORE_COMMENTERS" '
+      ($ignore | split(",") | map(gsub("^\\s+|\\s+$"; "") | select(. != ""))) as $ignored
+      | $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | ($comments[0] | add // []) as $issue_comments
       | ($inline[0] | add // []) as $inline_comments
@@ -448,7 +561,8 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}
                  + (if $track then {at:$at,
                    # A resolved inline thread counts as answered.
-                   unanswered:(if ._signal == "review-comment" then
+                   unanswered:(if ($ignored | index($e.user.login)) != null then false
+                     elif ._signal == "review-comment" then
                        ($resolved | index($root)) == null
                        and (any($inline_comments[]; .user.login == $c.user.login and (.in_reply_to_id // .id) == $root and .id > $e.id) | not)
                      elif ._signal == "review" and .state == "CHANGES_REQUESTED" and (.body // "") != "" then
@@ -476,10 +590,7 @@ observe() { # canonical GitHub URL -> normalized JSON
              | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" \
       || unobserved 'observation could not be assembled' || return 1
   fi
-  jq_lib -ne --arg url "$url" --arg kind "$kind" --slurpfile observed "$TMP/observation.json" '
-    {schema:"fm-contributions.v1",task:"observation",records:[{url:$url,
-      kind:(if $kind == "pull" then "pr" else "issue" end),pending:[],seen:[],observation:$observed[0]}]}
-    | valid_record' >/dev/null || unobserved 'observation failed validation'
+  observation_valid "$url" "$kind"
 }
 
 publish_pending() { # task canonical-url record-file
@@ -493,7 +604,7 @@ publish_pending() { # task canonical-url record-file
     status=0
     reason="check: contributions $task $key"
     case "$type:$source" in
-      unanswered:https://github.com/*) reason="$reason unanswered $source $age" ;;
+      unanswered:https://github.com/*|unanswered:https://bitbucket.org/*) reason="$reason unanswered $source $age" ;;
     esac
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
     if ! fm_wake_queued_keys_locked check | grep -Fx "contribution-$key" >/dev/null; then
@@ -563,6 +674,12 @@ poll() {
     known($input[0];$saved[0]) | map(select(.url | supported_url))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
     | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
+  if [ "$TRACK_THREADS" = true ]; then
+    jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+      bitbucket_known($input[0];$saved[0])
+      | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
+      | .[] | [.url] + .tasks | @tsv' >> "$TMP/known.tsv"
+  fi
   : > "$TMP/live.tsv"
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 2 ] || continue
@@ -612,7 +729,7 @@ poll() {
           | [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] as $arrived
           # An acknowledgement removes the signal, not the thread: a thread
           # with no author reply or resolution is raised again after reply_age.
-          | (if $track and $o.state == "open" then tracked_threads($old.threads; $o.events; $arrived | map(.token); $now) else [] end) as $tracked
+          | (if $track and $o.state == "open" then tracked_threads($old.threads; $o.events + ($o.threads // []); $arrived | map(.token); $now) else [] end) as $tracked
           | due_threads($tracked; $epoch; $reply_age) as $due
           | ($tracked | map(.key)) as $live
           | ($due | map(.key)) as $due_keys
@@ -642,8 +759,9 @@ arm() {
   acquire
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
-    if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" \
-      --slurpfile saved "$TMP/saved.json" 'known($input[0];$saved[0]) | length > 0' >/dev/null; then
+    # A Bitbucket pull request counts only while review-thread tracking is on.
+    if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" --argjson track "$TRACK_THREADS" \
+      --slurpfile saved "$TMP/saved.json" 'known($input[0];$saved[0]) + (if $track then bitbucket_known($input[0];$saved[0]) else [] end) | length > 0' >/dev/null; then
       return 0
     fi
   fi
@@ -659,6 +777,9 @@ arm() {
   fi
   if [ -n "${FM_CONTRIBUTIONS_REPLY_AGE:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_REPLY_AGE=$(printf '%q' "$FM_CONTRIBUTIONS_REPLY_AGE")")
+  fi
+  if [ -n "${FM_CONTRIBUTIONS_IGNORE_COMMENTERS:-}" ]; then
+    shim+=("export FM_CONTRIBUTIONS_IGNORE_COMMENTERS=$(printf '%q' "$FM_CONTRIBUTIONS_IGNORE_COMMENTERS")")
   fi
   shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
   printf '%s\n' "${shim[@]}" > "$staged"
@@ -686,7 +807,7 @@ case "${1:-}" in
     task=$1; url=$2; shift 2
     acquire; get_input; read_saved
     jq_lib -ne --slurpfile input "$TMP/input.json" --arg task "$task" --arg url "$url" --slurpfile saved "$TMP/saved.json" \
-      'any(known($input[0];$saved[0])[]; .task == $task and .url == $url)' >/dev/null \
+      'any((known($input[0];$saved[0]) + bitbucket_known($input[0];$saved[0]))[]; .task == $task and .url == $url)' >/dev/null \
       || fail 'contribution is not owned by this durable task'
     jq -e --arg task "$task" --arg url "$url" '.[] | select(.task == $task) | .records[] | select(.url == $url)' "$TMP/saved.json" > "$TMP/row.json" \
       || fail 'observe the contribution before recording evidence'
