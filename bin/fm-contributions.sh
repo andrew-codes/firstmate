@@ -152,8 +152,10 @@
 # as unavailable if it lists fewer comments than the pull request counts. Any
 # comment by someone other than the pull request author is a thread comment
 # until the author comments later in its thread or the thread's root comment
-# is resolved; app accounts and the comma-separated display names or nicknames
-# in FM_CONTRIBUTIONS_IGNORE_COMMENTERS (such as a pipeline bot) are skipped.
+# is resolved. A comment from an app or AI-agent account, such as a code review
+# bot, counts only when anchored to a file and line; its general summary does
+# not. The comma-separated display names or nicknames in
+# FM_CONTRIBUTIONS_IGNORE_COMMENTERS (such as a pipeline bot) are skipped.
 # Nothing raises on arrival: such a comment is raised, with the same
 # "unanswered" wake and re-raise cadence, once it is a reply age old, and
 # ack, retire and the record keep working as for GitHub. A merged, declined
@@ -458,12 +460,18 @@ observe_bitbucket() { # canonical Bitbucket URL -> normalized JSON
     | ($live | INDEX(.id | tostring)) as $by
     | def top($c): if $c.parent == null then $c.id
         else ($by[($c.parent.id | tostring)] as $up | if $up == null then $c.parent.id else top($up) end) end;
-    # An unanswered comment is one the author, an app account and the ignored
-    # names did not write, in a thread nobody resolved, with no later author reply.
+    # An unanswered comment is one the author and the ignored names did not
+    # write, in a thread nobody resolved, with no later author reply. An app or
+    # AI-agent account counts only through a comment anchored to a file and line,
+    # so its general summary and notices stay out.
+    def anchored: (.inline | type == "object") and (.inline.path // "") != ""
+      and ((.inline.to // .inline.from) != null);
+    def actionable: ((.user.type == "app_user") or (.user.ai_agent // false)) as $bot
+      | if $bot then anchored else true end;
     {state:(if $p.state == "OPEN" then "open" elif $p.state == "MERGED" then "merged" else "closed" end),
      head:null,checks:[],reviews:[],events:[],
      threads:[$live[] as $c
-       | select(($c.user | who) != $author and $c.user.type != "app_user" and (($c.user.ai_agent // false) | not)
+       | select(($c.user | who) != $author and ($c | actionable)
          and ($skip | index($c.user.display_name // "")) == null and ($skip | index($c.user.nickname // "")) == null)
        | top($c) as $root
        | select(($by[($root | tostring)].resolution // null) == null)

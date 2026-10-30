@@ -103,7 +103,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 
-- `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default, durable in `config/contributions-reply-age`) that turns on re-raising unanswered review threads after that age, including those on a Bitbucket pull request a task recorded (read through `twg`, with bot commenters named in `FM_CONTRIBUTIONS_IGNORE_COMMENTERS` skipped), and the authenticated contribution check.
+- `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default, durable in `config/contributions-reply-age`) that turns on re-raising unanswered review threads after that age, including those on a Bitbucket pull request a task recorded (read through `twg`, where an app or AI-agent reviewer counts only through an inline comment and commenters named in `FM_CONTRIBUTIONS_IGNORE_COMMENTERS` are skipped), and the authenticated contribution check.
 
 - The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 

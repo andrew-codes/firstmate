@@ -45,13 +45,14 @@ write_pr() {
     > "$1/forge/pr.json"
 }
 
-# comment <id> <user> <created> [parent] [resolved]: one Bitbucket comment
+# comment <id> <user> <created> [parent] [resolved] [inline-path]: one Bitbucket comment
 comment() {
-  jq -n --argjson id "$1" --arg user "$2" --arg created "$3" --arg parent "${4:-}" --arg resolved "${5:-}" '
+  jq -n --argjson id "$1" --arg user "$2" --arg created "$3" --arg parent "${4:-}" --arg resolved "${5:-}" --arg path "${6:-}" '
     {id:$id,user:({uuid:("{" + $user + "}"),display_name:$user,nickname:$user,type:"user"}
         + (if $user == "rovo-dev" then {type:"app_user",ai_agent:true} else {} end)),
      created_on:($created | sub("Z$"; ".123456+00:00")),updated_on:($created | sub("Z$"; ".123456+00:00")),
      deleted:false,pending:false,content:{raw:"please look"},
+     inline:(if $path == "" then null else {from:null,to:12,path:$path,start_from:null,start_to:null} end),
      parent:(if $parent == "" then null else {id:($parent | tonumber)} end),
      resolution:(if $resolved == "" then null else {type:"resolution"} end),
      links:{html:{href:("https://bitbucket.org/myworkspace/my-repo/pull-requests/7/_/diff#comment-" + ($id | tostring))}}}'
@@ -157,6 +158,22 @@ test_bot_comments_are_ignored() {
   printf '%s\n' "$out" | grep -Fq 'comment-101 ' || fail "an unlisted commenter was not raised: $out"
   printf '%s\n' "$out" | grep -Fq 'comment-102 ' && fail "an app account was raised: $out"
   pass 'configured bot commenters and app accounts need no reply'
+}
+
+# The shape of a real code review bot pull request: inline findings from an app
+# AI-agent account, its general review summary, and a pipeline notice account.
+test_inline_bot_comments_count() {
+  local home out
+  home=$(new_home inline-bot)
+  write_pr "$home" OPEN "$( { comment 101 iap-pipelines-bot "$T0"; comment 102 rovo-dev "$T0" '' '' src/a.ts; comment 103 rovo-dev "$T0" '' '' src/b.sh; comment 104 rovo-dev "$T0"; } | comments)"
+  out=$(poll_at "$home" 2026-09-16T12:00:00Z FM_CONTRIBUTIONS_IGNORE_COMMENTERS=iap-pipelines-bot) || fail 'poll failed'
+  printf '%s\n' "$out" | grep -Fq 'comment-102 ' || fail "an inline bot comment was not raised: $out"
+  printf '%s\n' "$out" | grep -Fq 'comment-103 ' || fail "a second inline bot comment was not raised: $out"
+  printf '%s\n' "$out" | grep -Eq 'comment-10[14] ' && fail "a notice or the bot summary was raised: $out"
+  write_pr "$home" OPEN "$( { comment 102 rovo-dev "$T0" '' yes src/a.ts; comment 103 rovo-dev "$T0" '' '' src/b.sh; } | comments)"
+  out=$(poll_at "$home" 2026-09-16T12:30:00Z FM_CONTRIBUTIONS_IGNORE_COMMENTERS=iap-pipelines-bot) || fail 'poll after resolving failed'
+  printf '%s\n' "$out" | grep -Fq 'comment-102 ' && fail "a resolved inline bot thread was raised: $out"
+  pass 'inline comments from an app account count, its summary and notices do not'
 }
 
 test_merged_pull_request_ends_tracking() {
@@ -276,7 +293,7 @@ SH
 }
 
 failures=0
-for test_name in test_unanswered_thread_is_raised_after_the_age_and_again test_author_reply_answers test_resolved_thread_is_answered test_bot_comments_are_ignored test_merged_pull_request_ends_tracking test_unset_setting_reads_nothing test_arm_and_coverage test_failed_read_is_reported_once test_github_path_is_unchanged; do
+for test_name in test_unanswered_thread_is_raised_after_the_age_and_again test_author_reply_answers test_resolved_thread_is_answered test_bot_comments_are_ignored test_inline_bot_comments_count test_merged_pull_request_ends_tracking test_unset_setting_reads_nothing test_arm_and_coverage test_failed_read_is_reported_once test_github_path_is_unchanged; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures Bitbucket contribution regressions"
