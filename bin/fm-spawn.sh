@@ -2559,6 +2559,36 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
+  if [ "$KIND" != secondmate ]; then
+    # A worker must come back in its own disposable worktree, never in a
+    # primary home or a repository's primary checkout: refuse
+    # rather than fall back to wherever the restored pane happens to sit.
+    relaunch_wt_real=$(cd "$RELAUNCH_WT" 2>/dev/null && pwd -P) || relaunch_wt_real=$RELAUNCH_WT
+    relaunch_primary=
+    for relaunch_cand in "$FM_HOME" "$FM_ROOT"; do
+      relaunch_cand_real=$(cd "$relaunch_cand" 2>/dev/null && pwd -P) || continue
+      [ "$relaunch_wt_real" = "$relaunch_cand_real" ] && relaunch_primary=$relaunch_cand
+    done
+    if [ -z "$relaunch_primary" ]; then
+      # Probe the directory's own layout: an inherited GIT_DIR naming a linked
+      # worktree with GIT_WORK_TREE naming the primary checkout would otherwise
+      # make the two answers differ and pass the primary checkout.
+      relaunch_gdc=$(
+        unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE \
+          GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_NAMESPACE \
+          GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
+          GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT
+        git -C "$RELAUNCH_WT" rev-parse --path-format=absolute --git-dir --git-common-dir 2>/dev/null
+      ) || relaunch_gdc=
+      relaunch_gd=${relaunch_gdc%%$'\n'*}
+      relaunch_gc=${relaunch_gdc#*$'\n'}
+      [ -z "$relaunch_gd" ] || [ "$relaunch_gd" != "$relaunch_gc" ] || relaunch_primary="its repository's primary checkout"
+    fi
+    [ -z "$relaunch_primary" ] || {
+      echo "error: task $ID's recorded worktree '$RELAUNCH_WT' is the primary home or checkout ($relaunch_primary), not an isolated task worktree; refusing to relaunch a worker there" >&2
+      exit 1
+    }
+  fi
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
@@ -5460,18 +5490,29 @@ spawn_enter_recorded_worktree() {
 # starts. Zellij and cmux implement this read with a shell probe, so keeping it
 # before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
-  local expected seen i
+  local expected seen i last_poll=19 agent_status
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
-  for i in $(seq 1 20); do
+  # The out-of-pane Herdr lease no longer waits for the new shell to process
+  # treehouse get. Allow its former minute of startup tolerance here, and
+  # repeat the idempotent cd once in case input arrived before shell readiness.
+  [ "$BACKEND" != herdr ] || last_poll=120
+  for i in $(seq 0 "$last_poll"); do
+    [ "$i" -eq 0 ] || sleep 0.5
     seen=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
-    [ "$i" -ge 20 ] || sleep 0.5
+    if [ "$BACKEND" = herdr ] && [ "$i" -eq 20 ]; then
+      spawn_enter_recorded_worktree
+    fi
   done
   echo "error: task $ID's worker started in '${seen:-unknown}', not its recorded worktree '$WT'; refusing to continue outside the copy holding its work" >&2
+  if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$WT_TARGET"; then
+    agent_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+    echo "error: Herdr pane '$WT_TARGET': last foreground_cwd='${seen:-unknown}', agent_status='${agent_status:-unknown}'" >&2
+  fi
   exit 1
 }
 
