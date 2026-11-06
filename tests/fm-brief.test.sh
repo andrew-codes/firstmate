@@ -524,6 +524,12 @@ test_no_mistakes_dod_wording() {
   assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
     "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
 
+  # Stop-at-green stays, and the worker learns why it may: the daemon keeps watching.
+  assert_grep "the no-mistakes daemon, not you, keeps watching the PR until it merges" "$brief" \
+    "no-mistakes DOD must say the daemon, not the worker, keeps watching until merge"
+  assert_grep "Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished." "$brief" \
+    "no-mistakes DOD must keep the stop-at-green behaviour"
+
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
   # claim an enforcement the tool does not provide: this is instruction only.
   assert_grep "NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide." "$brief" \

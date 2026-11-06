@@ -1394,6 +1394,52 @@ test_uncontradicted_failure_is_still_presented() {
 }
 
 
+# An open PR nothing monitors is a supervisor-actionable outcome even though the
+# worker already said done: the daemon-restart shape reads failed, the parked ci
+# gate shape reads parked, both with the same component, and each wakes once.
+test_open_pr_without_live_monitor_wakes_once() {
+  local shape state detail payload
+  for shape in interrupted parked; do
+    make_world "outcome-no-monitor-$shape"
+    write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/42 checks green'
+    if [ "$shape" = interrupted ]; then
+      state=failed
+      detail='ci monitor interrupted by daemon restart, PR remains open · open PR, no live monitor · run: 01RUN · pr=https://example.test/owner/repo/pull/42'
+    else
+      state=parked
+      detail='parked at ci: 1 finding(s) · open PR, no live monitor · run: 01RUN · pr=https://example.test/owner/repo/pull/42'
+    fi
+    FM_FAKE_CREW_STATE=$state FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL=$detail \
+      run_reconcile "$MAIN" --startup
+    payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+    [ -n "$payload" ] || fail "$shape: an open PR with no live monitor was not queued"
+    case "$payload" in
+      *"state=$state"*'pr=https://example.test/owner/repo/pull/42'*) ;;
+      *) fail "$shape: wake did not name the state and PR: $payload" ;;
+    esac
+    age "$MAIN/state/child.meta" "$MAIN/state/child.status"
+    FM_FAKE_CREW_STATE=$state FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL=$detail \
+      run_reconcile "$MAIN" --startup
+    [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+      || fail "$shape: the same unmonitored PR woke the supervisor more than once"
+  done
+  pass "an open PR with no live monitor wakes the supervisor exactly once"
+}
+
+# A parked gate WITHOUT the component stays a gate the worker or the existing
+# gate supervision owns: the exception is only for the walked-away ci gate.
+test_ordinary_parked_gate_does_not_wake() {
+  make_world outcome-plain-parked
+  write_child "$MAIN" child 'working: validating'
+  FM_FAKE_CREW_STATE=parked FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='parked at review: 2 finding(s)' \
+    run_reconcile "$MAIN" --startup
+  [ -z "$(queued_payload "$MAIN" 'inactive-outcome:')" ] \
+    || fail "a plain parked gate woke the supervisor as an inactive outcome"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] \
+    || fail "a plain parked gate minted a terminal outcome"
+  pass "an ordinary parked gate is not an inactive outcome"
+}
+
 # Forge command shims fail loudly. A successful scan proves this path never uses
 # them while reconciling a local terminal outcome.
 test_reconciliation_never_calls_forge() {
@@ -1475,5 +1521,7 @@ test_contradicted_success_is_not_promoted_for_presentation
 test_run_step_failure_is_not_suppressed_by_the_crews_own_word
 test_stale_pause_does_not_suppress_the_failure
 test_uncontradicted_failure_is_still_presented
+test_open_pr_without_live_monitor_wakes_once
+test_ordinary_parked_gate_does_not_wake
 
 echo "all inactive reconciliation tests passed"
