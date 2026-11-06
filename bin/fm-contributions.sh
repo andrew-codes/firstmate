@@ -9,7 +9,8 @@
 #   fm-contributions.sh ack <task> <url> <event-token>
 #   fm-contributions.sh retire <task> <url> captain <reason>
 #   fm-contributions.sh arm [--if-owned]
-#   fm-contributions.sh owned
+#   fm-contributions.sh owned [bitbucket]
+#   fm-contributions.sh threads <bitbucket-pr-url>
 #   fm-contributions.sh enroll <task> <pr-url>
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
@@ -25,7 +26,13 @@
 # owned prints the supported PR URLs this home owns as a JSON array of
 # {url,tasks,recorded,final}, where recorded names the tasks holding a durable
 # record for the URL and final means a saved observation is merged or closed.
-# It is read-only and never contacts a forge.
+# It is read-only and never contacts a forge. owned bitbucket prints the
+# Bitbucket Cloud pull requests a task recorded as its pr= or already observed
+# as {url,tasks}, whether or not thread tracking is on.
+# threads makes one bounded twg read of a Bitbucket pull request and prints
+# {tracked,state,threads}: the unresolved, unanswered review threads below,
+# and whether FM_CONTRIBUTIONS_REPLY_AGE tracking is on, in which case
+# the poll below owns raising them. It records nothing and takes no lock.
 # Only canonical PR and issue URLs on the exact github.com host are supported;
 # other accepted URLs remain visibly unmeasured. A Bitbucket Cloud pull request
 # is the one exception, described with the reply age below, and is never a
@@ -852,14 +859,26 @@ case "${1:-}" in
     ;;
   poll) poll ;;
   arm) arm "${2:-}" ;;
+  threads)
+    [ "$#" -eq 2 ] || fail 'threads needs one Bitbucket pull request URL'
+    DEADLINE=$(( $(date +%s) + BUDGET ))
+    observe_bitbucket "$2" || { sed -n '1p' "$TMP/why" >&2; exit 1; }
+    jq -n --argjson tracked "$TRACK_THREADS" --slurpfile observed "$TMP/observation.json" \
+      '{tracked:$tracked,state:$observed[0].state,threads:$observed[0].threads}'
+    ;;
   owned)
     get_input; read_saved
     [ "$ERRORS" -eq 0 ] || fail "$ERRORS unreadable contribution record(s); ownership is unverified"
-    jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-      [$saved[0][] | .records[] | select(.error == null and (.observation.state | IN("merged","closed"))) | .url] as $final
-      | known($input[0];$saved[0]) | map(select((.url | supported_url) and (.url | contains("/pull/"))))
-      | group_by(.url) | map(.[0].url as $url | {url:$url,tasks:(map(.task) | unique),
-        recorded:([$saved[0][] | select(any(.records[]; .url == $url)) | .task] | unique),final:($url | IN($final[]))})'
+    if [ "${2:-}" = bitbucket ]; then
+      jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+        bitbucket_known($input[0];$saved[0]) | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})'
+    else
+      jq_lib -n --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
+        [$saved[0][] | .records[] | select(.error == null and (.observation.state | IN("merged","closed"))) | .url] as $final
+        | known($input[0];$saved[0]) | map(select((.url | supported_url) and (.url | contains("/pull/"))))
+        | group_by(.url) | map(.[0].url as $url | {url:$url,tasks:(map(.task) | unique),
+          recorded:([$saved[0][] | select(any(.records[]; .url == $url)) | .task] | unique),final:($url | IN($final[]))})'
+    fi
     ;;
   enroll)
     [ "$#" -eq 3 ] || fail 'enroll needs a task and a PR URL'

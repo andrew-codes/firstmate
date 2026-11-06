@@ -842,6 +842,11 @@ Only author-actionable states, conflicts, and failing checks print; the maintain
 Reads are driven by the GitHub notifications feed: each pass makes one conditional read of it, which GitHub answers with an uncounted 304 while nothing changed, and reads only the owned PRs with new notification activity, PRs not yet read, and PRs whose last read did not settle.
 Every owned PR is still read when the feed is unavailable or returns a full page of notifications newer than the saved position, and at least every 15 minutes as the fallback sweep, because some conditions, such as a base branch moving into conflict or a check from another app failing, raise no notification.
 GitLab merge requests are not monitored yet.
+A Bitbucket Cloud pull request is monitored through `twg` when a live task recorded it as its `pr=` (or a thread-tracking contribution record already holds it); it has no notification feed and no branch discovery, so each open one is read at most every five minutes.
+It wakes once per latest commit for a failed git mergeability check (a conflict), once per latest commit and check for another blocking merge check that failed, such as the maximum-commits-behind rule, and once per latest commit and status name for a failed build.
+Approval merge checks and build merge checks do not wake, a stopped build is a cancelled run, and a pending or unknown check never clears a reported condition.
+Each unresolved review thread wakes once, using the same reading as the unanswered-thread observer, and never while `FM_CONTRIBUTIONS_REPLY_AGE` tracking is on because that observer then raises the thread itself.
+A failed mergeability or thread read skips only that condition and is retried on the next pass.
 When no reported check is marked required, a failing reported check still counts, matching `bin/fm-pr-state.sh` for unprotected stacked bases.
 When a required check has reported, optional failures do not notify.
 A conflict and an author action each wake once per latest commit, and a missing approval is recorded once per latest commit.

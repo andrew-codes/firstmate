@@ -278,17 +278,17 @@ test_reconcile() {
 }
 
 test_merge_outcome_moves_to_done() {
-  local dir url=https://bitbucket.org/example-workspace/example-app/pull-requests/7
-  dir=$(make_case mergehook fm/PROJ-9-x)
-  printf 'done: PR %s checks green\n' "$url" > "$dir/state/task-a.status"
+  local case_dir url=https://bitbucket.org/example-workspace/example-app/pull-requests/7
+  case_dir=$(make_case mergehook fm/PROJ-9-x)
+  printf 'done: PR %s checks green\n' "$url" > "$case_dir/state/task-a.status"
   (
     # shellcheck source=bin/fm-merge-outcome-lib.sh
     . "$ROOT/bin/fm-merge-outcome-lib.sh"
-    PATH="$dir/fakebin:$BASE_PATH" FM_TEST_JIRA_LOG="$dir/jira.log" FM_TEST_JIRA_STATUS="$dir/jira-status" \
-      FM_CONFIG_OVERRIDE="$dir/config" fm_merge_outcome_report "$dir" "$dir/state" task-a "$url" self \
+    PATH="$case_dir/fakebin:$BASE_PATH" FM_TEST_JIRA_LOG="$case_dir/jira.log" FM_TEST_JIRA_STATUS="$case_dir/jira-status" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" fm_merge_outcome_report "$case_dir" "$case_dir/state" task-a "$url" self \
       || fail "the merge outcome was not recorded"
   ) || exit 1
-  [ "$(jira_status "$dir")" = Done ] || fail "a recorded merge did not move the item to Done"
+  [ "$(jira_status "$case_dir")" = Done ] || fail "a recorded merge did not move the item to Done"
   pass "a recorded merge moves the item to Done"
 }
 

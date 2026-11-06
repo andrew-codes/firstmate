@@ -2625,6 +2625,7 @@ FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 # no-mistakes monitor is watching it: bin/fm-crew-state.sh mints it for an
 # interrupted ci monitor and for a ci gate left parked after the worker reported
 # the PR ready, and bin/fm-inactive-reconcile.sh is its only consumer.
+# shellcheck disable=SC2034 # Read by bin/fm-crew-state.sh and bin/fm-inactive-reconcile.sh, not this lib.
 FM_NO_LIVE_MONITOR='open PR, no live monitor'
 
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer

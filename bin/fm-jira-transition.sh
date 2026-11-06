@@ -183,8 +183,8 @@ cmd_set() {  # <task-id> <target>
 }
 
 # One pull request read: a single twg call that includes comments, statuses and tasks.
-# Sets R_VERDICT; reasons accumulate in R_REASONS.
-R_VERDICT='' R_REASONS='' R_TITLE=''
+# Sets R_VERDICT, which carries any not-ready reasons itself.
+R_VERDICT='' R_TITLE=''
 pr_json_fields() {  # <json> <ignore-csv>
   printf '%s' "$1" | jq -r --arg ignore "$2" '
     (if type == "object" and has("data") then .data else . end)
@@ -214,7 +214,7 @@ pr_json_fields() {  # <json> <ignore-csv>
 cmd_ready() {  # <task-id>
   local id=$1 rc=0 url json fields line r_state='' r_draft='' r_head='' r_dest='' r_tasks='' r_build='' r_unreplied=''
   local mode behind overview choice run_id run_out run_status run_head nm_branch
-  R_VERDICT='' R_REASONS='' R_TITLE=''
+  R_VERDICT='' R_TITLE=''
   load_task "$id" || rc=$?
   if [ "$rc" -ne 0 ]; then R_VERDICT="skip: ${T_SKIP:-invalid task}"; return 0; fi
   url=$(meta_get "$T_META" pr)
@@ -307,7 +307,6 @@ FIELDS
     esac
   fi
 
-  R_REASONS=$reasons
   if [ "$draft" = 1 ]; then
     if [ -z "$reasons" ]; then R_VERDICT='draft-ready'; else R_VERDICT=draft; fi
   elif [ -n "$reasons" ]; then

@@ -960,8 +960,187 @@ SH
   pass 'final contributions are not enrolled on a poll'
 }
 
+BB_URL=https://bitbucket.org/ws/repo/pull-requests/7
+BB_HEAD_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BB_HEAD_B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BB_CLEAN_MERGE='[{"type":"git_mergeability_check","status":"PASSED","blocking":false},{"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"PASSED","blocking":false}]'
+
+# A Bitbucket home: a fake twg serves one pull request from files in $FORGE, and
+# a fake gh logs any call so a case can prove the GitHub path stayed untouched.
+bb_home() { # name -> home owning one Bitbucket pull request through a task's pr=
+  local home
+  home=$(new_home "$1")
+  cat > "$home/fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FORGE/twg.log"
+case "$*" in *' mergeability '*) [ ! -e "$FORGE/bb-merge-fails" ] || exit 1; cat "$FORGE/bb-merge.json"; exit 0 ;; esac
+case "$*" in *--comments*) [ ! -e "$FORGE/bb-threads-fails" ] || exit 1; cat "$FORGE/bb-comments.json"; exit 0 ;; esac
+case "$*" in *'pull-requests get'*) [ ! -e "$FORGE/bb-get-fails" ] || exit 1; cat "$FORGE/bb-get.json"; exit 0 ;; esac
+exit 2
+SH
+  chmod +x "$home/fakebin/twg"
+  : > "$home/forge/twg.log"
+  task "$home" ship1 "pr=$BB_URL"
+  bb_set "$home" OPEN "$BB_HEAD_A" "$BB_CLEAN_MERGE" '[]' '[]'
+  arm "$home"
+  printf '%s\n' "$home"
+}
+
+# bb_set <home> <state> <head> <merge-checks-json> <statuses-json> <comments-json>
+bb_set() {
+  jq -n --arg state "$2" --arg head "$3" --argjson statuses "$5" \
+    '[{state:$state,source:{commit:{hash:$head}},author:{uuid:"{author}",display_name:"author"},_statuses:$statuses}]' > "$1/forge/bb-get.json"
+  printf '%s\n' "$4" > "$1/forge/bb-merge.json"
+  jq -n --arg state "$2" --argjson comments "$6" \
+    '[{state:$state,author:{uuid:"{author}",display_name:"author"},comment_count:($comments | length),_comments:$comments}]' \
+    > "$1/forge/bb-comments.json"
+}
+
+bb_comment() { # id [resolved]
+  jq -n --argjson id "$1" --arg resolved "${2:-}" '
+    {id:$id,user:{uuid:"{reviewer}",display_name:"reviewer",nickname:"reviewer",type:"user"},
+     created_on:"2026-10-21T00:00:00.000000+00:00",updated_on:"2026-10-21T00:00:00.000000+00:00",
+     deleted:false,pending:false,content:{raw:"please look"},inline:null,parent:null,
+     resolution:(if $resolved == "" then null else {type:"resolution"} end),
+     links:{html:{href:("https://bitbucket.org/ws/repo/pull-requests/7/_/diff#comment-" + ($id | tostring))}}}'
+}
+
+bb_due() { # make every read due again, as the interval elapsing does
+  [ -f "$1/state/pr-health.json" ] || return 0
+  jq '.prs |= with_entries(.value.read_at = 0)' "$1/state/pr-health.json" > "$1/state/pr-health.next" \
+    && mv "$1/state/pr-health.next" "$1/state/pr-health.json"
+}
+
+bb_reads() { grep -c 'pull-requests get' "$1/forge/twg.log" || true; }
+
+test_bitbucket_conflict_behind_and_build_wake_once() {
+  local home out
+  home=$(bb_home bb-conditions)
+  expect_silent "$home" 'a clean Bitbucket PR must not notify'
+  bb_set "$home" OPEN "$BB_HEAD_A" '[{"type":"git_mergeability_check","status":"FAILED","blocking":true},{"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"FAILED","blocking":true}]' \
+    '[{"key":"build","name":"build","state":"FAILED","created_on":"2026-10-21T00:00:00Z"}]' '[]'
+  bb_due "$home"
+  out=$(pass_once "$home")
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 3 ] || fail "a conflict, a failed merge check and a red build must wake once each: $out"
+  printf '%s\n' "$out" | grep -F "$BB_URL conflicts with its base at latest commit aaaaaaa (task ship1)" >/dev/null || fail "no conflict line: $out"
+  printf '%s\n' "$out" | grep -F "$BB_URL fails merge checks at latest commit aaaaaaa: maximum commits behind (task ship1)" >/dev/null || fail "no behind line: $out"
+  printf '%s\n' "$out" | grep -F "$BB_URL has failing checks at latest commit aaaaaaa: build (task ship1)" >/dev/null || fail "no build line: $out"
+  bb_due "$home"
+  expect_silent "$home" 'conditions already reported at the same commit must not repeat'
+  bb_set "$home" OPEN "$BB_HEAD_B" '[{"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"FAILED","blocking":true}]' \
+    '[{"key":"build","name":"build","state":"FAILED","created_on":"2026-10-21T00:00:00Z"}]' '[]'
+  bb_due "$home"
+  out=$(pass_once "$home")
+  [ "$(printf '%s\n' "$out" | grep -c .)" = 2 ] || fail "a new commit must report its own failures again: $out"
+  [ ! -s "$home/forge/calls.log" ] || fail "a Bitbucket PR triggered a GitHub read: $(cat "$home/forge/calls.log")"
+  pass 'a Bitbucket conflict, failed merge check and red build each wake once per latest commit'
+}
+
+test_bitbucket_unproven_conditions_are_silent() {
+  local home
+  home=$(bb_home bb-silent)
+  # Pending, unknown, non-blocking, approval and build merge checks, and builds that are running or stopped, never wake.
+  bb_set "$home" OPEN "$BB_HEAD_A" '[{"type":"git_mergeability_check","status":"PENDING","blocking":false},
+    {"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"UNKNOWN"},
+    {"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"FAILED","blocking":false},
+    {"type":"merge_check","check":{"kind":"require_approvals_to_merge"},"status":"FAILED","blocking":true},
+    {"type":"merge_check","check":{"kind":"require_passing_builds_to_merge"},"status":"FAILED","blocking":true}]' \
+    '[{"key":"a","name":"a","state":"INPROGRESS","created_on":"2026-10-21T00:00:00Z"},{"key":"b","name":"b","state":"STOPPED","created_on":"2026-10-21T00:00:00Z"},
+      {"key":"c","name":"c","state":"FAILED","created_on":"2026-10-20T00:00:00Z"},{"key":"c","name":"c","state":"SUCCESSFUL","created_on":"2026-10-21T00:00:00Z"}]' '[]'
+  expect_silent "$home" 'unproven, approval and replaced conditions must not notify'
+  [ "$(bb_reads "$home")" -ge 1 ] || fail 'the silent case never read the pull request'
+  jq -e --arg url "$BB_URL" '.prs[$url].read_at > 0' "$home/state/pr-health.json" >/dev/null || fail 'the silent case recorded no read'
+  pass 'pending, non-blocking, approval and superseded Bitbucket conditions stay silent'
+}
+
+test_bitbucket_threads_wake_once_each() {
+  local home out
+  home=$(bb_home bb-threads)
+  bb_set "$home" OPEN "$BB_HEAD_A" "$BB_CLEAN_MERGE" '[]' "[$(bb_comment 101)]"
+  bb_due "$home"
+  expect_one "$home" "$BB_URL has 1 new unresolved review thread: .*comment-101 \(task ship1\)" 'an unresolved thread must wake'
+  bb_due "$home"
+  expect_silent "$home" 'a thread already reported must not wake again'
+  bb_set "$home" OPEN "$BB_HEAD_A" "$BB_CLEAN_MERGE" '[]' "[$(bb_comment 101),$(bb_comment 102)]"
+  bb_due "$home"
+  out=$(pass_once "$home")
+  printf '%s\n' "$out" | grep -F 'comment-102' >/dev/null || fail "the new thread must wake: $out"
+  ! printf '%s\n' "$out" | grep -F 'comment-101' >/dev/null || fail "the reported thread must not repeat: $out"
+  bb_set "$home" OPEN "$BB_HEAD_A" "$BB_CLEAN_MERGE" '[]' "[$(bb_comment 101 resolved),$(bb_comment 102 resolved)]"
+  bb_due "$home"
+  expect_silent "$home" 'resolving threads must not wake'
+  pass 'each unresolved Bitbucket review thread wakes once'
+}
+
+test_bitbucket_threads_belong_to_the_contribution_observer_when_tracked() {
+  local home
+  home=$(bb_home bb-threads-tracked)
+  bb_set "$home" OPEN "$BB_HEAD_A" "$BB_CLEAN_MERGE" '[]' "[$(bb_comment 101)]"
+  bb_due "$home"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_REPLY_AGE=3600 bash "$home/state/pr-health.check.sh") || fail 'the PR health check failed'
+  [ -z "$out" ] || fail "a thread the reply-age observer raises also woke the health monitor: $out"
+  jq -e --arg url "$BB_URL" '.prs[$url].threads | length == 1' "$home/state/pr-health.json" >/dev/null || fail 'the tracked thread was not recorded'
+  pass 'threads stay with the reply-age observer when it is tracking them'
+}
+
+test_bitbucket_failed_read_keeps_other_conditions_and_retries() {
+  local home out
+  home=$(bb_home bb-partial)
+  bb_set "$home" OPEN "$BB_HEAD_A" '[{"type":"git_mergeability_check","status":"FAILED","blocking":true}]' '[]' "[$(bb_comment 101)]"
+  : > "$home/forge/bb-merge-fails"
+  bb_due "$home"
+  expect_one "$home" 'has 1 new unresolved review thread' 'a failed mergeability read must not hide a thread'
+  rm -f "$home/forge/bb-merge-fails"
+  # The partial read left the pull request due without waiting out the interval.
+  expect_one "$home" 'conflicts with its base at latest commit aaaaaaa' 'the retried mergeability read must wake'
+  : > "$home/forge/bb-get-fails"
+  bb_due "$home"
+  expect_silent "$home" 'an unreadable pull request must stay silent'
+  rm -f "$home/forge/bb-get-fails"
+  expect_silent "$home" 'a recovered read must not repeat a reported condition'
+  pass 'a failed Bitbucket read is retried and never hides or repeats another condition'
+}
+
+test_bitbucket_reads_are_spaced_and_final_prs_are_not_read_again() {
+  local home before
+  home=$(bb_home bb-interval)
+  pass_once "$home" >/dev/null
+  before=$(bb_reads "$home")
+  [ "$before" -ge 1 ] || fail 'the first pass did not read the pull request'
+  pass_once "$home" >/dev/null
+  [ "$(bb_reads "$home")" = "$before" ] || fail 'a read inside the interval read the pull request again'
+  bb_set "$home" MERGED "$BB_HEAD_A" "$BB_CLEAN_MERGE" '[]' '[]'
+  bb_due "$home"
+  expect_silent "$home" 'a merged PR must not notify'
+  before=$(bb_reads "$home")
+  bb_due "$home"
+  pass_once "$home" >/dev/null
+  [ "$(bb_reads "$home")" = "$before" ] || fail 'a merged Bitbucket PR was read again'
+  pass 'Bitbucket reads are spaced and a merged PR is final'
+}
+
+test_bitbucket_pr_without_an_owning_task_is_not_read() {
+  local home
+  home=$(new_home bb-unowned)
+  cat > "$home/fakebin/twg" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FORGE/twg.log"
+exit 1
+SH
+  chmod +x "$home/fakebin/twg"
+  task "$home" ship1 "status=PR $BB_URL"
+  arm "$home"
+  expect_silent "$home" 'a PR only mentioned in a status line must not notify'
+  [ ! -s "$home/forge/twg.log" ] || fail "an unowned Bitbucket PR was read: $(cat "$home/forge/twg.log")"
+  pass 'an unowned Bitbucket PR is never read'
+}
+
 failures=0
-for test_name in test_maintainer_author_and_approval_states_are_distinct \
+for test_name in test_bitbucket_conflict_behind_and_build_wake_once test_bitbucket_unproven_conditions_are_silent \
+  test_bitbucket_threads_wake_once_each test_bitbucket_threads_belong_to_the_contribution_observer_when_tracked \
+  test_bitbucket_failed_read_keeps_other_conditions_and_retries test_bitbucket_reads_are_spaced_and_final_prs_are_not_read_again \
+  test_bitbucket_pr_without_an_owning_task_is_not_read \
+  test_maintainer_author_and_approval_states_are_distinct \
   test_pending_reviewer_without_review_decision_is_recorded test_more_than_a_page_of_review_requests_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_busy_feed_still_reads_only_events test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \
