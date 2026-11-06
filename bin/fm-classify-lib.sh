@@ -2621,6 +2621,12 @@ crew_is_paused() {  # <id>
 # crew_gate_awaits_human_decision below is its only consumer.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 
+# The one spelling of the verdict component that says a PR is still open but no
+# no-mistakes monitor is watching it: bin/fm-crew-state.sh mints it for an
+# interrupted ci monitor and for a ci gate left parked after the worker reported
+# the PR ready, and bin/fm-inactive-reconcile.sh is its only consumer.
+FM_NO_LIVE_MONITOR='open PR, no live monitor'
+
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
 # is owed by a human rather than by the crewmate itself.
 #

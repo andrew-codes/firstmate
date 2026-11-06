@@ -751,6 +751,47 @@ steps[9]{step,status,findings,duration_ms}:
 EOF
 }
 
+# The daemon restarted while the ci step monitored an open PR: it marks the run
+# ci_monitor_interrupted (terminal, PR remains open) and skips the ci step.
+run_ci_monitor_interrupted() {  # <branch> [outcome-line]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: ci_monitor_interrupted
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/203"
+  findings: none
+${2-outcome: ci-monitor-interrupted}
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  rebase,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,completed,0,0
+  push,completed,0,0
+  pr,completed,0,0
+  ci,skipped,0,76127890
+EOF
+}
+
+# A ci gate left parked after the worker reported the PR ready.
+run_parked_ci_gate() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/203"
+  findings[1]{id,severity,file,line,action,description}:
+    c1,warning,a.go,,ask-user,reviewer feedback needs a product call
+gate: ci
+EOF
+}
+
 # Same shape but with no outcome line: only top-level status reads failed.
 run_failed_ci_orphan_status_only() {  # <branch>
   cat <<EOF
@@ -2190,6 +2231,101 @@ daemon shutting down"
   assert_contains "$out" "state: failed" "a second failed step keeps the run failed"
   assert_not_contains "$out" "state: done" "a second failed step must not reclassify to done"
   pass "a second failed step disqualifies the orphaned-monitor reclassification"
+}
+
+# An interrupted ci monitor leaves the PR open with nothing watching it, so it
+# must not read as a delivery (done) or as the generic "outcome: ..." unknown.
+test_ci_monitor_interrupted_reads_open_pr_no_live_monitor() {
+  local variant forge out d
+  for variant in outcome status-only; do
+    for forge in open skipped; do
+      reset_fakes
+      d=$(new_case "ci-monitor-interrupted-$variant-$forge")
+      make_repo_on_branch "$d/wt" fm/feat-cmi
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/feat-cmi.meta" "window=fm:fm-feat-cmi" "worktree=$d/wt" "kind=ship"
+      printf 'done: PR https://github.com/o/r/pull/203 checks green\n' > "$d/state/feat-cmi.status"
+      if [ "$variant" = outcome ]; then
+        FM_FAKE_AXI_STATUS="$(run_ci_monitor_interrupted fm/feat-cmi)"
+      else
+        FM_FAKE_AXI_STATUS="$(run_ci_monitor_interrupted fm/feat-cmi '')"
+      fi
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      if [ "$forge" = skipped ]; then
+        out=$(FM_CREW_STATE_NO_FORGE=1 run_crew_state "$d" feat-cmi)
+      else
+        out=$(run_crew_state "$d" feat-cmi)
+      fi
+      assert_contains "$out" "state: failed" "$variant/$forge: an unmonitored open PR is not a delivery"
+      assert_contains "$out" "source: run-step" "$variant/$forge: read from the run record"
+      assert_contains "$out" " · open PR, no live monitor" "$variant/$forge: names the lost monitor as its own component"
+      assert_contains "$out" "pr=https://github.com/o/r/pull/203" "$variant/$forge: PR URL surfaced"
+      assert_not_contains "$out" "outcome: ci-monitor-interrupted" "$variant/$forge: no generic reading"
+    done
+  done
+  pass "an interrupted ci monitor reads as open PR, no live monitor"
+}
+
+test_ci_monitor_interrupted_merged_pr_reads_done() {
+  reset_fakes
+  local d; d=$(new_case ci-monitor-interrupted-merged)
+  make_repo_on_branch "$d/wt" fm/feat-cmim
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cmim.meta" "window=fm:fm-feat-cmim" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitor_interrupted fm/feat-cmim)"
+  FM_FAKE_PR_STATE=MERGED
+  FM_FAKE_PR_MERGED=true
+  local out; out=$(run_crew_state "$d" feat-cmim)
+  assert_contains "$out" "state: done" "a PR merged after the monitor was interrupted is delivered"
+  assert_not_contains "$out" "no live monitor" "a merged PR needs no monitor"
+  pass "an interrupted ci monitor on a merged PR reads done"
+}
+
+test_ci_monitor_interrupted_closed_pr_reads_unknown() {
+  reset_fakes
+  local d; d=$(new_case ci-monitor-interrupted-closed)
+  make_repo_on_branch "$d/wt" fm/feat-cmic
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cmic.meta" "window=fm:fm-feat-cmic" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitor_interrupted fm/feat-cmic)"
+  FM_FAKE_PR_STATE=CLOSED
+  FM_FAKE_PR_MERGED=false
+  local out; out=$(run_crew_state "$d" feat-cmic)
+  assert_contains "$out" "state: unknown" "a closed PR is neither delivered nor unmonitored"
+  assert_not_contains "$out" "no live monitor" "a closed PR needs no monitor"
+  pass "an interrupted ci monitor on a closed PR reads unknown"
+}
+
+# The worker finished at green, then the ci step parked: nobody is left to
+# answer the gate. A gate parked BEFORE the worker reported ready keeps its
+# plain parked reading, because the worker is still there to escalate it.
+test_parked_ci_gate_after_worker_done_reads_no_live_monitor() {
+  reset_fakes
+  local d out
+  d=$(new_case parked-ci-after-done)
+  make_repo_on_branch "$d/wt" fm/feat-pcd
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pcd.meta" "window=fm:fm-feat-pcd" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/203 checks green\n' > "$d/state/feat-pcd.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_ci_gate fm/feat-pcd)"
+  out=$(run_crew_state "$d" feat-pcd)
+  assert_contains "$out" "state: parked" "a parked ci gate stays parked"
+  assert_contains "$out" "1 finding(s)" "gate findings stay visible"
+  assert_contains "$out" " · open PR, no live monitor" "worker finished at green: nothing monitors the PR"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/203" "PR URL surfaced for the supervisor"
+
+  reset_fakes
+  d=$(new_case parked-ci-worker-active)
+  make_repo_on_branch "$d/wt" fm/feat-pca
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pca.meta" "window=fm:fm-feat-pca" "worktree=$d/wt" "kind=ship"
+  printf 'working: validating\n' > "$d/state/feat-pca.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_ci_gate fm/feat-pca)"
+  out=$(run_crew_state "$d" feat-pca)
+  assert_contains "$out" "state: parked" "a parked ci gate with a live worker stays parked"
+  assert_not_contains "$out" "no live monitor" "a worker that has not finished still owns the gate"
+  pass "a parked ci gate after the worker finished reads open PR, no live monitor"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -6812,6 +6948,10 @@ test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
 test_terminal_failed_ci_genuine_red_stays_failed
 test_terminal_failed_ci_orphan_second_failed_step_stays_failed
+test_ci_monitor_interrupted_reads_open_pr_no_live_monitor
+test_ci_monitor_interrupted_merged_pr_reads_done
+test_ci_monitor_interrupted_closed_pr_reads_unknown
+test_parked_ci_gate_after_worker_done_reads_no_live_monitor
 test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown

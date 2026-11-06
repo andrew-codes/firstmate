@@ -77,7 +77,13 @@
 # verdict unchanged. Both reads share the scan budget left after the state
 # read (at least one second, like the first visit above), and hitting that
 # bound ends the visit like a state-read timeout.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
+# The one parked exception is a ci gate carrying the open-PR-no-live-monitor
+# component (FM_NO_LIVE_MONITOR in bin/fm-classify-lib.sh): the worker already
+# reported the PR ready, so no live agent will answer the gate, and the same
+# receipt wakes the supervisor once per incarnation and PR. A failed read
+# carrying that component is the daemon-restart shape, a ci monitor interrupted
+# with the PR still open.
+# Working, paused, other parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
@@ -654,6 +660,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
+    # A ci gate parked after the worker reported the PR ready: nothing monitors
+    # the open PR and nobody is left to answer the gate (fm-crew-state.sh mints
+    # the component), so it is the one parked reading that wakes the supervisor.
+    'state: parked '*"$STATE_LINE_SEP$FM_NO_LIVE_MONITOR"*) state='parked' ;;
     *) return 0 ;;
   esac
   left=$((timeout - ($(date +%s) - started)))

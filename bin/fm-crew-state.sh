@@ -131,7 +131,17 @@
 #      forge evidence leaves the original failed or unknown classification.
 #      A monitor whose only remaining job is to observe a merge decision must not
 #      convert the absence of that decision into a failure verdict
-#      (nm_reclassify_failed_run_as_held_green). In the
+#      (nm_reclassify_failed_run_as_held_green).
+#      An OPEN PR no monitor is watching is a different shape and reads with
+#      FM_NO_LIVE_MONITOR (bin/fm-classify-lib.sh) as its own detail component,
+#      which bin/fm-inactive-reconcile.sh wakes the supervisor on once: a run
+#      the daemon marked ci_monitor_interrupted (outcome ci-monitor-interrupted,
+#      PR remains open, never resumed) reads failed unless a merge receipt or
+#      the forge read proves the PR merged (done) or closed (unknown); and a
+#      run parked at the ci gate after the crew's own done line reported the PR
+#      ready reads parked with the component and the run's PR, because the
+#      crew is finished and nobody is left to answer the gate.
+#      In the
 #      coarse runs-ledger fallback (no steps table, no ci log), a terminal
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
@@ -287,7 +297,7 @@ emit() {  # <state> <source> [detail]
 emit_run() {  # <state> <detail> [pr]
   local detail=$2
   case "$1" in
-    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+    done|failed|parked) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
   esac
   emit "$1" run-step "$detail"
 }
@@ -931,6 +941,28 @@ nm_reclassify_failed_run_as_held_green() {
   return 0
 }
 
+# Read a run the daemon marked ci_monitor_interrupted: it restarted while the
+# ci step was monitoring an open PR, kept the PR open, and never resumes the
+# monitor, so nothing corrects later conflicts, review feedback, or a PR that
+# falls behind. That is open-PR-without-a-monitor, which is neither a pipeline
+# failure nor a delivery: it reads failed with FM_NO_LIVE_MONITOR so
+# bin/fm-inactive-reconcile.sh wakes the supervisor once. Only positive merged or
+# closed evidence retires the claim (a merge-poll receipt or the bounded forge
+# read), because an unreadable PR cannot prove the monitor is no longer needed.
+nm_read_interrupted_monitor() {
+  case "$(passed_pr_detail)" in
+    "run passed: PR merged")
+      RUN_STATE="done"
+      RUN_DETAIL="PR merged (ci monitor interrupted before the merge was seen)" ;;
+    "run passed: PR closed")
+      RUN_STATE=unknown
+      RUN_DETAIL="PR closed after the ci monitor was interrupted: nothing left to monitor" ;;
+    *)
+      RUN_STATE=failed
+      RUN_DETAIL="ci monitor interrupted by daemon restart, PR remains open${SEP}$FM_NO_LIVE_MONITOR" ;;
+  esac
+}
+
 # 0 when an explicit probe proves the shared daemon down: `no-mistakes daemon
 # status` is the canonical down-probe (the same one fm-brief.sh hands crews
 # before a blocked append) and exits non-zero when the daemon is not running.
@@ -1351,6 +1383,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        ci-monitor-interrupted) nm_read_interrupted_monitor ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1379,11 +1412,19 @@ if [ "$HAVE_RUN" = 1 ]; then
       if nm_gate_awaits_human_decision; then
         RUN_DETAIL="$RUN_DETAIL${SEP}$FM_GATE_HUMAN_DECISION"
       fi
+      # A ci gate the worker walked away from: it reported the PR ready and
+      # finished, so nobody is left to answer the gate and nothing monitors the
+      # open PR meanwhile. The run's own PR rides along for the supervisor.
+      if [ "$gate" = ci ] && log_reports_ci_ready; then
+        RUN_DETAIL="$RUN_DETAIL${SEP}$FM_NO_LIVE_MONITOR"
+        NO_MONITOR_PR=$RUN_PR
+      fi
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        ci_monitor_interrupted|ci-monitor-interrupted) nm_read_interrupted_monitor ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1551,6 +1592,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     esac
   fi
 
+  [ "$RUN_STATE" != parked ] || TERMINAL_PR=${NO_MONITOR_PR:-}
   emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
 fi
 
