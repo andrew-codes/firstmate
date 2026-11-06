@@ -60,6 +60,27 @@
 # at an already reported commit wakes once more, a name already reported there
 # never repeats, and the line names only the new ones. The conditions have
 # independent histories.
+# A Bitbucket Cloud pull request is monitored through twg when a live task
+# recorded it as its pr= (or a thread-tracking record already holds it); it has
+# no notification feed and no branch discovery. Each open one is read at most
+# every BITBUCKET_SECONDS with get --statuses, mergeability and
+# fm-contributions.sh threads. Only the get read is required: a failed
+# mergeability or threads read skips just those conditions and is retried on the
+# next pass. A line is printed for each new
+#   - conflict: the git mergeability check FAILED.
+#   - failing merge check: another blocking merge check FAILED, such as the
+#     maximum-commits-behind rule. Approval and build checks are left out here:
+#     approvals are never printed and a build is judged as its own status.
+#   - failing build: the newest status of a key (by created_on) is FAILED or
+#     ERROR. STOPPED is a cancelled run, and a pending or unknown check never
+#     clears a reported condition.
+#   - unresolved review threads: those fm-contributions.sh threads reports,
+#     which reads them the way its unanswered-thread wake does. A thread wakes
+#     once while it stays unresolved, and never while FM_CONTRIBUTIONS_REPLY_AGE
+#     tracking is on, because that observer then raises it itself.
+# A conflict, merge check or build wakes once per latest commit (the source
+# commit hash) and name, as on GitHub. A merged, declined or superseded pull
+# request is final.
 # A merged or closed PR is final and never read again. A failed or timed-out
 # read, or a latest commit that differs between the two reads, leaves the PR's
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
@@ -123,8 +144,9 @@ live_tasks() { # id <TAB> worktree, for each task that is not a secondmate
   done
 }
 
-owned_json() { # -> $TMP/owned.json
-  "$SCRIPT_DIR/fm-contributions.sh" owned > "$TMP/owned.json" 2> "$TMP/owned.err"
+owned_json() { # -> $TMP/owned.json and $TMP/owned-bb.json
+  "$SCRIPT_DIR/fm-contributions.sh" owned > "$TMP/owned.json" 2> "$TMP/owned.err" \
+    && "$SCRIPT_DIR/fm-contributions.sh" owned bitbucket > "$TMP/owned-bb.json" 2>> "$TMP/owned.err"
 }
 
 save_health() { # json-file
@@ -373,6 +395,128 @@ read_notifications() { # deadline
     || NOTIFY_OK=1
 }
 
+# The Bitbucket fingerprint step: previous fingerprint plus the get, mergeability
+# and threads reads -> {fp, lines}. A null result means the pull request read is
+# unusable and nothing moves. An absent mergeability or threads read (null) skips
+# only that condition and keeps its fingerprint.
+BB_STEP='
+  def norm: (if type == "object" and has("data") then .data else . end) | (if type == "array" then .[0] else . end);
+  def kind: .check.kind // .type // "";
+  def failing_status: (.state // "" | ascii_upcase) | IN("FAILED","FAILURE","ERROR");
+  ($pr[0] | norm) as $r | ($prev[0] // {}) as $p
+  | if ($r.state // "") | IN("MERGED","DECLINED","SUPERSEDED") then {fp:($p + {final:true}),lines:[]}
+    elif $r.state != "OPEN" or ((($r.source.commit.hash // "") | length) < 7) then null
+    else
+      $r.source.commit.hash as $head
+      | ($tasks | join(", ")) as $owners
+      | ("at latest commit " + $head[:7]) as $where
+      | ([($r._statuses // [])[] | . + {name:(.name // .key // "")} | select(.name != "")]
+          | group_by(.key // .name) | map(sort_by(.created_on // .updated_on // "") | last)
+          | map(select(failing_status) | .name) | unique) as $failing
+      | ($merge[0] | if . == null then null elif type == "array" then . else .values end) as $m
+      | ([($m // [])[] | select(((.status // "") | ascii_upcase) == "FAILED"
+          and (kind == "git_mergeability_check" or .blocking != false))]) as $failed_merge
+      | any($failed_merge[]; kind == "git_mergeability_check") as $conflicting
+      | ([$failed_merge[] | kind | select(. != "git_mergeability_check" and (test("approv|reviewer|changes_requested|build"; "i") | not))]
+          | unique) as $merge_failing
+      | ($p.conflicts // []) as $conflicts | ($p.merge_checks // []) as $merge_checks | ($p.checks // []) as $checks
+      | ($conflicting and ($conflicts | index($head) | not)) as $conflict_new
+      | [$merge_failing[] | select(. as $name | any($merge_checks[]; .head == $head and .name == $name) | not)] as $new_merge
+      | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
+      | ($threads[0] // null) as $t
+      | ($p.threads // []) as $seen
+      | ([($t.threads // [])[] | . + {key:(.token | split(":") | .[:2] | join(":"))}]) as $live
+      | [$live[] | select(.key as $key | $seen | index($key) | not)] as $new_threads
+      | {fp:{conflicts:($conflicts + if $conflict_new then [$head] else [] end),
+             merge_checks:($merge_checks + [$new_merge[] | {head:$head,name:.}]),
+             checks:($checks + [$new_failing[] | {head:$head,name:.}]),
+             threads:(if $t == null then $seen else [$live[].key] end),
+             read_at:$now},
+         lines:([
+           (select($conflict_new)
+            | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
+           (select(($new_merge | length) > 0)
+            | "pr-health: \($url) fails merge checks \($where): \($new_merge[:3] | map(sub("_"; " "; "g")) | join(", "))\(if ($new_merge | length) > 3 then " and \(($new_merge | length) - 3) more" else "" end) (task \($owners))"),
+           (select(($new_failing | length) > 0)
+            | "pr-health: \($url) has failing checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))"),
+           (select(($new_threads | length) > 0 and ($t.tracked != true))
+            | "pr-health: \($url) has \($new_threads | length) new unresolved review thread\(if ($new_threads | length) == 1 then "" else "s" end): \($new_threads[:3] | map(.source) | join(", "))\(if ($new_threads | length) > 3 then " and \(($new_threads | length) - 3) more" else "" end) (task \($owners))")])}
+    end'
+BITBUCKET_SECONDS=300 # ponytail: fixed per-PR read interval, since twg has no change feed; make it a config value if a home needs it faster
+
+bb_read() { # deadline cap output args... : one bounded read, kept only when it succeeds
+  local left=$(($1 - $(date +%s))) cap=$2 out=$3
+  shift 3
+  [ "$left" -gt 0 ] || { : > "$out"; return 124; }
+  [ "$left" -le "$cap" ] || left=$cap
+  fm_run_timed "$left" "$@" > "$out" 2>/dev/null || { : > "$out"; return 1; }
+}
+
+read_bitbucket_pr() { # url deadline output-directory -> get.json merge.json threads.json, ok only when get is usable
+  local url=$1 deadline=$2 out=$3 number workspace repo
+  local -a ref
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = bitbucket ] || return 1
+  number=$FM_PR_NUMBER
+  workspace=${FM_PR_PATH%%/*}; repo=${FM_PR_PATH#*/}
+  ref=(-w "$workspace" -r "$repo" -o json --output-summary none)
+  bb_read "$deadline" 5 "$out/get.json" twg bb pull-requests get "$number" --statuses "${ref[@]}" &
+  local get_pid=$!
+  bb_read "$deadline" 5 "$out/merge.json" twg bb pull-requests mergeability "$number" "${ref[@]}" &
+  local merge_pid=$!
+  bb_read "$deadline" 8 "$out/threads.json" "$SCRIPT_DIR/fm-contributions.sh" threads "$url" &
+  local threads_pid=$!
+  wait "$get_pid" || true
+  wait "$merge_pid" || true
+  wait "$threads_pid" || true
+  jq -e 'type == "object" or type == "array"' "$out/get.json" >/dev/null 2>&1 || return 1
+  # Anything but a mergeability list or threads document is an absent read, not an empty one.
+  jq -e 'type == "array" or (type == "object" and (.values | type == "array"))' "$out/merge.json" >/dev/null 2>&1 || : > "$out/merge.json"
+  jq -e 'type == "object" and (.threads | type == "array")' "$out/threads.json" >/dev/null 2>&1 || : > "$out/threads.json"
+}
+
+poll_bitbucket() { # deadline : read each due owned open Bitbucket PR once and wake on new conditions
+  local deadline=$1 url index=0 read_dir now pid unsettled
+  local pids=()
+  now=$(date +%s)
+  jq -r --argjson now "$now" --argjson interval "$BITBUCKET_SECONDS" --slurpfile health "$TMP/health.json" '
+    .[] | .url as $url | ($health[0].prs[$url] // {}) as $fp
+    | select(($fp.final // false) | not)
+    | select(($now - ($fp.read_at // 0)) >= $interval or ($fp.unsettled // false))
+    | $url' "$TMP/owned-bb.json" > "$TMP/bb-urls"
+  [ -s "$TMP/bb-urls" ] || return 0
+  while IFS= read -r url; do
+    index=$((index + 1))
+    read_dir="$TMP/bb-$index"
+    mkdir "$read_dir"
+    (
+      read_bitbucket_pr "$url" "$deadline" "$read_dir" && : > "$read_dir/ok"
+    ) &
+    pids+=("$!")
+  done < "$TMP/bb-urls"
+  for pid in ${pids[@]+"${pids[@]}"}; do wait "$pid" || true; done
+  index=0
+  while IFS= read -r url; do
+    index=$((index + 1))
+    read_dir="$TMP/bb-$index"
+    [ -f "$read_dir/ok" ] || continue
+    jq -n --arg url "$url" --argjson now "$now" --slurpfile pr "$read_dir/get.json" --slurpfile merge "$read_dir/merge.json" \
+      --slurpfile threads "$read_dir/threads.json" --slurpfile prev <(jq --arg url "$url" '.prs[$url] // {}' "$TMP/health.json") \
+      --argjson tasks "$(jq -c --arg url "$url" '[.[] | select(.url == $url) | .tasks[]] | unique' "$TMP/owned-bb.json")" \
+      "$BB_STEP" > "$TMP/step.json" 2>/dev/null || continue
+    [ "$(cat "$TMP/step.json")" != null ] || continue
+    jq -r '.lines[]' "$TMP/step.json"
+    # A partial read keeps the pull request due on the next pass instead of waiting out the interval.
+    unsettled=false
+    [ -s "$read_dir/merge.json" ] && [ -s "$read_dir/threads.json" ] || unsettled=true
+    jq --arg url "$url" --argjson unsettled "$unsettled" --slurpfile step "$TMP/step.json" '
+      .prs[$url] = ($step[0].fp + (if $unsettled then {unsettled:true} else {} end))' "$TMP/health.json" > "$TMP/next.json"
+    if ! cmp -s "$TMP/next.json" "$TMP/health.json"; then
+      save_health "$TMP/next.json"
+      cp "$TMP/next.json" "$TMP/health.json"
+    fi
+  done < "$TMP/bb-urls"
+}
+
 poll() {
   local deadline timeout url step pid index=0 read_dir now full
   local pids=()
@@ -408,8 +552,9 @@ poll() {
   fi
   enroll_new "$deadline"
   # Keep fingerprints and branch lookups only for what this home still owns.
-  jq --slurpfile owned "$TMP/owned.json" --arg live "$(live_tasks | cut -f1 | paste -sd ' ' -)" '
-    ($owned[0] | map(.url)) as $urls | ($live | split(" ")) as $ids
+  jq --slurpfile owned "$TMP/owned.json" --slurpfile owned_bb "$TMP/owned-bb.json" \
+    --arg live "$(live_tasks | cut -f1 | paste -sd ' ' -)" '
+    ($owned[0] + $owned_bb[0] | map(.url)) as $urls | ($live | split(" ")) as $ids
     | .ownership_error = false
     | .prs |= with_entries(select(.key | IN($urls[])))
     | .branches |= with_entries(select(.key | IN($ids[])))' "$TMP/health.json" > "$TMP/next.json"
@@ -464,6 +609,7 @@ poll() {
       cp "$TMP/next.json" "$TMP/health.json"
     fi
   done < "$TMP/urls"
+  poll_bitbucket "$deadline"
   jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" '
     if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
