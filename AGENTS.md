@@ -433,3 +433,9 @@ Keep this file for knowledge useful to almost every future agent session in this
 Do not repeat what the codebase already shows; point to the authoritative file, skill, command, or doc.
 Prefer rewriting or pruning existing entries over appending new ones.
 When updating this file, preserve every safety boundary and keep the always-loaded contract concise.
+
+## Fork documentation
+
+In a fork that carries `FORK.md`, keep it current in the same PR as any fork-only feature you add, change, or remove.
+`FORK.md` is written for end users and lists only the capabilities they gain over upstream, in plain language, with no file paths, function names, commit or PR references, or implementation detail.
+Document each new configuration value in `docs/fork-configuration.md`, with what it is, what it controls, and a real example.
