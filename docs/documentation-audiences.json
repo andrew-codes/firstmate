@@ -358,6 +358,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/fork-configuration.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/tern-backend.md",
       "audience": "operator-current"
     },
