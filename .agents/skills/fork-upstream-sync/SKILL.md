@@ -39,7 +39,7 @@ If checks are red or a required check has not reported, do not merge: report it 
    - add a temporary `upstream` remote for `https://github.com/kunchenguid/firstmate.git`, fetch it, and merge new upstream commits into the ship branch, resolving conflicts in favor of keeping both upstream behavior and the fork's features;
    - read `FORK.md` for the fork's Bitbucket Cloud features, then review the newly pulled upstream features and write the gaps to a file under its task data directory, one entry per gap: the upstream feature, what the fork's Bitbucket support lacks for it, and the files involved;
    - remove the `upstream` remote before reporting done, because a leftover upstream remote in the shared clone makes the publication gate refuse every fork task;
-   - leave `FORK.md` alone unless the sync changes a fork capability a user can see.
+   - update the "It is current with upstream through commit `<sha>` (<date>)" line in `FORK.md` to the last upstream commit merged and its date, in the same PR, and leave the rest of `FORK.md` alone unless the sync changes a fork capability a user can see.
 3. The worker never creates issues or edits the PR description itself; firstmate does both from its gap file.
 
 ## 2. Gap issues and PR description
