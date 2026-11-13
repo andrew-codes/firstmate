@@ -2,7 +2,7 @@
 
 This is a fork of [kunchenguid/firstmate](https://github.com/kunchenguid/firstmate), maintained by Andrew Smith.
 It does everything upstream does and adds the capabilities below.
-It is current with upstream through commit `913bb7a7` (2026-11-09).
+It is current with upstream through commit `427056c4` (2026-11-12).
 
 ## What you gain
 
