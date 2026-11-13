@@ -21,7 +21,7 @@ The firstmate-fork project is registered in this home; every task below is a shi
   Load `firstmate-self-repo` first for the gate, and `firstmate-coding-guidelines` for the worker's brief.
 - The sync PR is the only automerge.
   Every per-issue PR is reported with its full URL and waits for the captain's explicit word.
-- Never skip the review, test or document step of the pipeline in this fork, because the required check rejects a PR whose attestation shows any of them skipped; answer a gate with an action that completes the step, and a skipped lint for a missing host tool is fine.
+- Never skip the review, test or document step of the pipeline in this fork, because the required check rejects a PR whose attestation shows any of them skipped; a skipped lint for a missing host tool is fine.
 
 ## Merge authority for the sync PR
 
