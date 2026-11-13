@@ -1,7 +1,7 @@
 ---
 name: fork-upstream-sync
 description: Load when the captain invokes this skill or asks to sync the fork with upstream, and when a fork-sync PR merges and its Bitbucket gap issues are waiting to be implemented.
-user-invocable: false
+user-invocable: true
 metadata:
   internal: true
 ---
@@ -32,6 +32,7 @@ If checks are red or a required check has not reported, do not merge: report it 
 ## 1. Sync ship
 
 1. Find the upstream work to pull: the `upstream-synced` tag names the last upstream commit merged, and `git log upstream-synced..<upstream main>` lists what is new.
+   On the first run the tag does not exist yet; use `git merge-base <fork main> <upstream main>` as the baseline instead.
    Derive it each run; never hardcode SHAs in the brief.
 2. Dispatch one ship on firstmate-fork with the project's registered mode, branch prefix, and `--project` as usual, plus the upstream consent above.
    The brief tells the worker to:
@@ -50,14 +51,12 @@ When the worker reports the PR ready:
 2. Edit the sync PR description so it summarizes the merged upstream range and links every issue by full URL under a "Bitbucket gaps" heading.
    With no gaps, say so in the description and create no issues.
 3. Register the PR with `bin/fm-pr-check.sh` as `ship-landing` directs, then merge it per the merge-authority section once checks are green.
-4. After the merge, move the `upstream-synced` tag to the last upstream commit merged and push the tag to the fork only, as the tag's own annotation describes.
+4. After the merge, move the `upstream-synced` tag to the last upstream commit merged and push the tag to the fork only:
+   `git tag -f -a upstream-synced <upstream sha> -m "last upstream commit merged"`, then `git push --force origin refs/tags/upstream-synced`.
+   This creates the tag on the first run.
 
 ## 3. Per-issue ships
 
 After the sync PR merges and the fork clone is refreshed, dispatch one ship per gap issue: one issue, one PR.
 Each brief's captain intent is the issue's substance, with the issue URL, and the same upstream consent.
 Report each ready PR with its full URL and wait for the captain's word; never auto-merge it, whatever the project's yolo posture says.
-
-## Lavish questions
-
-After opening any Lavish question page, listen for the answer with a background `lavish-axi poll`.
