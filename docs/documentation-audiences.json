@@ -162,6 +162,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/fork-upstream-sync/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/no-mistakes-fork-upstream-sync/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
