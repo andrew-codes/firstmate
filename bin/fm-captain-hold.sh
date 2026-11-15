@@ -220,8 +220,9 @@
 # or no longer a captain hold, and with a non-zero exit naming the cause when
 # the question changed or the PR ended in the other terminal state.
 # A `release` policy waits while the home is away, like `answer --release`, and
-# a later settle-pr applies it. Only github.com PRs supported
-# by the contribution observer qualify. settle-pr reads that observer's durable,
+# a later settle-pr applies it. Only github.com and Bitbucket Cloud PRs supported
+# by the contribution observer qualify. tasks-axi cannot link a Bitbucket PR
+# through --pr, so pr-policy names its URL in the hold's title instead. settle-pr reads that observer's durable,
 # validated terminal evidence, never caller-supplied state or a captain answer.
 # It records forge-closed/forge-released reconciliation evidence before changing
 # the task, and retries interrupted settlement without duplicating the record.
@@ -1840,20 +1841,42 @@ $(body_hold_set_timestamp "$(show_field_value "$1" body)")
 $(resolution_record_count "$(show_field "$1" body)")"
 }
 
+show_has_link() {  # <show-output> <url>: the task's structured links name this URL
+  local word
+  local -a words=()
+  IFS=, read -r -a words <<< "$(show_field_value "$1" links)"
+  for word in ${words[@]+"${words[@]}"}; do
+    [ "${word#*:}" != "$2" ] || return 0
+  done
+  return 1
+}
+
 command_pr_policy() {
   local id=${1:-} url=${2:-} event=${3:-} action=${4:-} show dir tmp occurrence fingerprint
   [ "$#" -eq 4 ] || { usage >&2; exit 2; }
   [ -f "$CONFIG/hold-pr-settle" ] || fail 'config/hold-pr-settle is required'
   validate_slug task-id "$id"
-  jq -ne --arg url "$url" '$url | test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$")' >/dev/null \
-    || fail 'pr-policy requires a canonical github.com PR URL'
+  jq -ne --arg url "$url" '$url | test("^https://github[.]com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$")
+    or test("^https://bitbucket[.]org/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull-requests/[1-9][0-9]*$")' >/dev/null \
+    || fail 'pr-policy requires a canonical github.com or bitbucket.org PR URL'
   case "$event" in merged|closed|terminal) ;; *) fail 'event must be merged, closed, or terminal' ;; esac
   case "$action" in close|release) ;; *) fail 'action must be close or release' ;; esac
   acquire_task_control_lock "$id"
   require_tasks_axi
   command_open "$id" || fail "task $id is not an open captain hold"
-  tasks_axi update "$id" --pr "$url" >/dev/null || fail "could not link the PR on $id"
+  case "$url" in
+    https://bitbucket.org/*)
+      # tasks-axi only links GitHub or Forgejo PRs through --pr, so a Bitbucket
+      # PR is linked by naming its URL in the title, which the backlog reads as a link.
+      task_show_or_fail "$id" "task $id disappeared while declaring its PR policy"
+      show_has_link "$show" "$url" \
+        || tasks_axi update "$id" --title "$(show_field_value "$show" title) $url" >/dev/null \
+        || fail "could not link the PR on $id"
+      ;;
+    *) tasks_axi update "$id" --pr "$url" >/dev/null || fail "could not link the PR on $id" ;;
+  esac
   task_show_or_fail "$id" "task $id disappeared while declaring its PR policy"
+  show_has_link "$show" "$url" || fail "could not link the PR on $id"
   fingerprint=$(pr_hold_fingerprint "$show")
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   dir="$DATA/$id"

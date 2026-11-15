@@ -71,11 +71,26 @@ def known($input; $saved):
   | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
   | map(select(. as $pair | any($retired[]; . == $pair) | not));
 # Bitbucket pull requests a fleet task recorded as its pr=, plus those already
-# observed. Read only when review-thread tracking is on.
+# observed. bitbucket_polled below decides which of them poll reads.
 def bitbucket_known($input; $saved):
   ([($input.tasks // [])[] | select(.kind != "secondmate")
      | select(.pr.url | bitbucket_url) | {task:.id,url:.pr.url}]
    + [$saved[] | .task as $task | .records[] | select(.url | bitbucket_url) | {task:$task,url}])
+  | unique_by([.task,.url])
+  | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
+  | map(select(. as $pair | any($retired[]; . == $pair) | not));
+# The Bitbucket pull requests poll and arm --if-owned read. With thread tracking
+# on, that is every one bitbucket_known names. With config/hold-pr-settle
+# present, a held task's linked Bitbucket PR is read as well, and with tracking
+# off it is the only one read, so its terminal state can settle the hold.
+def bitbucket_polled($input; $saved; $track; $settle):
+  [($input.backlog.records // [])[] | select(.structured == true and .hold_bucket != null) | .id] as $held
+  | (bitbucket_known($input; $saved)
+     + (if $settle then
+         [($input.backlog.records // [])[] | select(.structured == true and .hold_bucket != null) as $task
+          | ($task.links // [])[] | select(bitbucket_url) | {task:$task.id,url:.}]
+       else [] end))
+  | map(select($track or ($settle and (.task as $task | $held | index($task) != null))))
   | unique_by([.task,.url])
   | [$saved[] | .task as $task | .records[] | select(.retired != null) | {task:$task,url}] as $retired
   | map(select(. as $pair | any($retired[]; . == $pair) | not));
