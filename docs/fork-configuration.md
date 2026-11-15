@@ -31,6 +31,33 @@ export FM_CONTRIBUTIONS_REPLY_AGE=1800
 export FM_CONTRIBUTIONS_IGNORE_COMMENTERS=ci-bot
 ```
 
+## Parking idle workers on Bitbucket pull requests
+
+Firstmate can stop the worker of a task whose Bitbucket Cloud pull request only waits for a human review, then start a fresh worker when a reviewer comments, asks for changes, or the pull request breaks.
+It uses the same settings as GitHub and GitLab parking, and it reads the pull request through your own signed-in `twg`.
+Firstmate never merges the pull request.
+Nothing is parked until you create `config/park-on-review`.
+
+| Setting | What it controls |
+| --- | --- |
+| `config/park-on-review` | An empty file that turns parking on for this home. |
+| `FM_PARK_READ_SECS` | Seconds each pull request read may take, 15 by default. Bitbucket needs two reads, run together under this one limit. A read that runs over is treated as unreadable, so the worker is not parked. Raise it if `twg` is slow. |
+| `FM_PARK_QUIET_SECS` | Seconds a pull request must stay quiet after its build finishes before it is parked, 900 by default. A review bot that has not approved or requested changes since the push is waited for this long. |
+| `config/contribution-review-bots` | One review bot per line. On Bitbucket, name the bot by its nickname. Bitbucket app users and AI agent accounts are already treated as review bots. |
+
+A pull request is parked only when it is open and not a draft, has no merge conflict, has a passing build on its latest commit, has no reviewer asking for changes, and has no unresolved review thread.
+An approval that is still owed does not stop parking.
+A branch counts as behind its target only when the repository turns on the maximum-commits-behind merge check.
+
+```sh
+# Park workers while their Bitbucket pull requests wait for review, allowing slow twg reads.
+touch config/park-on-review
+export FM_PARK_READ_SECS=30
+
+# Wait for the CodeRabbit bot, which Bitbucket lists as the nickname coderabbit.
+echo coderabbit >> config/contribution-review-bots
+```
+
 ## Jira status transitions
 
 `config/jira-status-transitions` turns on Jira status follow-through for the projects it lists.

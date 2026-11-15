@@ -14,38 +14,55 @@
 #
 # gate is read-only: one fresh forge read of the task's recorded pr= (GitHub
 # through one gh GraphQL read, GitLab through glab api for the merge request and
-# all pages of its discussions), never a cached verdict. It prints "clean head=<sha>" and
+# all pages of its discussions, Bitbucket Cloud through twg bb pull-requests get
+# --statuses --comments and mergeability, read together under one bound), never a
+# cached verdict. It prints "clean head=<sha>" and
 # exits 0, or prints one "unclean: <reason>" line per failing condition and
 # exits 3; an unreadable forge, an unsupported provider, or a missing pr= exits 1
 # and is never clean. Clean means ready to merge except for a human approval:
 #   - open and not a draft;
 #   - no conflict, not behind its base, mergeability computed (GitHub mergeable
 #     MERGEABLE with mergeStateStatus CLEAN, BLOCKED or HAS_HOOKS; GitLab
-#     has_conflicts false with detailed_merge_status mergeable or not_approved);
+#     has_conflicts false with detailed_merge_status mergeable or not_approved;
+#     Bitbucket git mergeability check PASSED, the maximum-commits-behind merge
+#     check not FAILED where the repository enables it, and no other blocking
+#     merge check FAILED apart from approval, reviewer and build checks);
 #   - CI green on the current head (GitHub statusCheckRollup SUCCESS on the
-#     head commit; GitLab head_pipeline success with its sha the MR's sha); no
+#     head commit; GitLab head_pipeline success with its sha the MR's sha;
+#     Bitbucket the newest status of every key SUCCESSFUL, none FAILED, and no
+#     failed build merge check); no
 #     CI reported on the current head is not green; on GitHub every check the
 #     base branch requires has also reported on the head, read with
 #     bin/fm-pr-merge.sh's required-check reading (bin/fm-pr-lib.sh), because
 #     the rollup holds only checks that reported; an unreadable requirement
 #     is unclean;
-#   - no changes requested (GitHub reviewDecision; GitLab requested_changes);
+#   - no changes requested (GitHub reviewDecision; GitLab requested_changes;
+#     Bitbucket a reviewer whose participant state is changes_requested);
 #   - zero unresolved review threads, all of them read (a failed GitLab
-#     discussions read counts as not all read);
+#     discussions read counts as not all read; on Bitbucket a thread is an
+#     unresolved root comment anchored to the diff or written by someone other
+#     than the PR author, and fewer comments read than the PR counts is not all
+#     read);
 #   - automated reviewers settled: every reviewer bot that has ever posted on
 #     the PR has submitted a review bound to the current head (a comment, or a
 #     comment edited later, does not prove its review finished), or the quiet
 #     window has elapsed since the anchor. The push time is the
 #     earliest check suite created on the head commit on GitHub (its committer
-#     time only when no check suite exists) and the head pipeline's creation on
-#     GitLab; the anchor is the later of that and the newest CI completion on
+#     time only when no check suite exists), the head pipeline's creation on
+#     GitLab, and the earliest build status of the head on Bitbucket (the PR's
+#     last update only when it has none); the anchor is the later of that and the newest CI completion on
 #     the head, so the window never starts before CI finished. A reviewer bot is a GitHub Bot account or
 #     [bot] login, a GitLab group or project access-token bot
-#     (group_<n>_bot_..., how CodeRabbit appears on gitlab.com), or a login
-#     listed in config/contribution-review-bots. The window is
+#     (group_<n>_bot_..., how CodeRabbit appears on gitlab.com), a Bitbucket
+#     app user or AI agent account (a review bound to the head there is an
+#     approval or change request it recorded after the push, since Bitbucket
+#     binds none to a commit), or a login (on Bitbucket the nickname) listed in
+#     config/contribution-review-bots. The window is
 #     FM_PARK_QUIET_SECS seconds (default 900), so a PR no bot touched parks
 #     only after it, never the moment CI turns green.
-# With --expect-head, a head other than <sha> is unclean too.
+# With --expect-head, a head other than <sha> is unclean too. Bitbucket reports a
+# PR head abbreviated to 12 characters, so heads are compared by prefix and a
+# head shorter than 12 hex characters is an unreadable forge.
 #
 # park re-establishes everything itself and accepts no verdict as input. It
 # refuses unless: the task is a ship with pr= and an armed merge poll
@@ -115,7 +132,8 @@
 # requested, a merge conflict, any unresolved review thread, or any new
 # comment (inline review-thread replies included), review or note created or
 # edited after the park (an approval with
-# no body is not a comment). A branch merely behind its base is not a trigger. It
+# no body is not a comment; on Bitbucket an approval or change request recorded
+# after the park is a review, and a change request is a trigger of its own). A branch merely behind its base is not a trigger. It
 # records its outcome and close lines as one check park-on-review wake before
 # it removes the reports they came from or marks a close as reported, then
 # prints them for the watcher to ring; when the wake cannot be recorded it
@@ -130,7 +148,9 @@
 # tick skips a lane whose lock is held. Its stdout outcome line, if any, is
 # published as state/.review-park-report-<id>-<epoch>-<pid> (a park refusal
 # prints none), and the next tick reports it.
-# Forge reads are bounded by FM_PARK_READ_SECS (default 15). Each lifecycle
+# Forge reads are bounded by FM_PARK_READ_SECS (default 15); the two Bitbucket
+# reads run at once and share one bound, and a read that exceeds it is an
+# unreadable forge, never a clean one, so a slow twg raises FM_PARK_READ_SECS. Each lifecycle
 # call an action makes (bin/fm-control.sh exit or relaunch, bin/fm-teardown.sh)
 # is bounded by FM_PARK_ACTION_SECS (default 900), a hang backstop well above
 # the bounded waits those owners keep themselves. A whole tick holds only reads
@@ -376,6 +396,71 @@ GITLAB_NORMALIZE='
            touched: (.updated_at // .created_at), on_head: false, approval_only: false}]
     }'
 
+# Bitbucket Cloud: the input is [get, mergeability], both as twg prints them
+# (get with --statuses --comments). Bitbucket reports a PR head abbreviated to
+# 12 characters, so the head is kept as read and compared by prefix. A thread is
+# a live root comment nobody resolved that is either anchored to the diff or
+# written by someone other than the PR author. A bot is an app user or AI agent
+# account; Bitbucket binds no review to a commit, so a bot settles through an
+# approval or change request it recorded after the head was pushed, or the quiet
+# window.
+BITBUCKET_NORMALIZE='
+  def norm: (if type == "object" and has("data") then .data else . end) | (if type == "array" then .[0] else . end);
+  def kind: .check.kind // .type // "";
+  def utc: if . == null then null else sub("[.][0-9]+"; "") | sub("[+]00:00$"; "Z") end;
+  def who: .nickname // .display_name // .uuid // "ghost";
+  def isapp: (.type == "app_user") or (.ai_agent == true);
+  (.[0] | norm) as $p
+  | (.[1] | if type == "object" and has("data") then .data else . end | if type == "object" then .values else . end) as $m
+  | if ($p | type) != "object" or ($m | type) != "array" then error("invalid pull request read") else . end
+  | ($p.source.commit.hash // "") as $head
+  | if ($head | test("^[0-9a-f]{12,64}$") | not) then error("head commit read is incoherent") else . end
+  | if ($p.state | IN("OPEN","MERGED","DECLINED","SUPERSEDED") | not) then error("unknown pull request state") else . end
+  | ([($p._statuses // [])[] | . + {name: (.name // .key // "")} | select(.name != "")]
+      | group_by(.key // .name) | map(sort_by(.created_on // .updated_on // "") | last)) as $st
+  | ($st | map((.state // "") | ascii_upcase)) as $sv
+  | ([$m[] | select(((.status // "") | ascii_upcase) == "FAILED" and (kind == "git_mergeability_check" or .blocking != false))]) as $failed
+  | ([$m[] | select(kind == "git_mergeability_check")] | first) as $git
+  | ([$failed[] | kind | select(. != "git_mergeability_check" and . != "maximum_commits_behind"
+       and (test("approv|reviewer|changes_requested|build"; "i") | not))] | unique) as $other
+  | ([($p.participants // [])[] | . + {rv: (.state // (if .approved == true then "approved" else null end))}
+      | select(.rv | IN("approved","changes_requested")) | select(.participated_on != null)]) as $reviews
+  | ([($p._comments // [])[] | select(((.deleted // false) or (.pending // false)) | not)]) as $live
+  | ($p.author.uuid // $p.author.display_name // "") as $author
+  | ($st | map(.created_on | select(. != null)) | min | utc // ($p.updated_on | utc)) as $pushed
+  | {
+      provider: "bitbucket",
+      state: (if $p.state == "OPEN" then "open" elif $p.state == "MERGED" then "merged" else "closed" end),
+      draft: ($p.draft == true),
+      head: $head,
+      merge_status: (if $git == null then "absent" else ($git.status // "unknown") end),
+      conflict: (if any($failed[]; kind == "git_mergeability_check") then "conflict"
+                 elif $git == null or ((($git.status // "") | ascii_upcase) != "PASSED") then "unknown"
+                 elif any($failed[]; kind == "maximum_commits_behind") then "behind"
+                 else "none" end),
+      blocked_other: (if ($other | length) > 0 then ($other | join(", ")) else null end),
+      ci: (if ($sv | length) == 0 then "none"
+           elif any($sv[]; IN("FAILED","FAILURE","ERROR")) then "failure"
+           elif any($failed[]; kind | test("build"; "i")) then "pending"
+           elif all($sv[]; . == "SUCCESSFUL") then "success"
+           else "pending" end),
+      ci_done_at: ($st | map(.updated_on // .created_on | select(. != null)) | max | utc),
+      pushed_at: $pushed,
+      changes_requested: (any($reviews[]; .rv == "changes_requested") or any($failed[]; kind | test("changes_requested"; "i"))),
+      threads_unresolved: ([$live[] | select(.parent == null and (.resolution // null) == null
+          and (((.inline | type) == "object" and (.inline.path // "") != "") or (.user.uuid // "") != $author))] | length),
+      threads_complete: (($p._comments | type) == "array"
+          and (($p.comment_count | type) != "number" or ($p._comments | length) >= $p.comment_count)),
+      comments_complete: true,
+      activity: (
+        [$live[] | {author: (.user | who), bot: (.user | isapp), at: (.created_on | utc),
+          touched: ((.updated_on // .created_on) | utc), on_head: false, approval_only: false}]
+        + [$reviews[] | {author: (.user | who), bot: (.user | isapp), at: (.participated_on | utc),
+          touched: (.participated_on | utc), on_head: (($pushed != null) and ((.participated_on | utc) >= $pushed)),
+          approval_only: (.rv == "approved")}]
+        | map(select(.at != null)))
+    }'
+
 # The required checks of the PR's base branch that have not reported on its
 # head, as a JSON array, read with the same required-check reading
 # bin/fm-pr-merge.sh does; fails when any requirement cannot be read.
@@ -399,7 +484,7 @@ github_required_unreported() {  # <graphql-json>
 # required checks not yet reported on the head (null when unreadable), which
 # only the gate reads.
 snapshot() {  # <pr-url> [--required]
-  local url=$1 raw mr discussions enc secs snap missing complete
+  local url=$1 raw mr discussions enc secs snap missing complete bb_dir get_pid merge_pid get_rc=0
   fm_pr_url_parse "$url" || return 1
   case "$FM_PR_PROVIDER" in
     github)
@@ -444,13 +529,40 @@ snapshot() {  # <pr-url> [--required]
       fi
       printf '%s\n%s\n%s\n' "$mr" "$discussions" "$complete" | jq -cs "$GITLAB_NORMALIZE" 2>/dev/null
       ;;
+    bitbucket)
+      command -v twg >/dev/null 2>&1 || return 1
+      bb_dir=$(mktemp -d "$PARK_TMP/bb.XXXXXX") || return 1
+      secs=$(step_secs "$READ_SECS") || return 1
+      # Both reads run at once under one bound, so a slow twg costs the tick one
+      # read slot, and an unreadable half is an unreadable forge.
+      fm_run_timed "$secs" twg bb pull-requests get "$FM_PR_NUMBER" --statuses --comments \
+        -w "${FM_PR_PATH%%/*}" -r "${FM_PR_PATH#*/}" -o json --output-summary none > "$bb_dir/get.json" 2>/dev/null &
+      get_pid=$!
+      fm_run_timed "$secs" twg bb pull-requests mergeability "$FM_PR_NUMBER" \
+        -w "${FM_PR_PATH%%/*}" -r "${FM_PR_PATH#*/}" -o json --output-summary none > "$bb_dir/merge.json" 2>/dev/null &
+      merge_pid=$!
+      wait "$get_pid" || get_rc=1
+      wait "$merge_pid" || get_rc=1
+      [ "$get_rc" = 0 ] || return 1
+      jq -cs "$BITBUCKET_NORMALIZE" "$bb_dir/get.json" "$bb_dir/merge.json" 2>/dev/null
+      ;;
     *) return 1 ;;
   esac
 }
 
+# Bitbucket reads a PR head abbreviated, so two heads are the same commit when
+# either is a prefix of the other.
+HEAD_SAME='def same($a; $b): ($a | length) > 0 and ($b | length) > 0 and (($a | startswith($b)) or ($b | startswith($a)));'
+head_same() {  # <sha> <sha>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  case "$1" in "$2"*) return 0 ;; esac
+  case "$2" in "$1"*) return 0 ;; esac
+  return 1
+}
+
 JQ_TIME='def ts: if . == null then null else (try (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) catch null) end;'
 
-GATE_PROGRAM="$JQ_TIME"'
+GATE_PROGRAM="$JQ_TIME$HEAD_SAME"'
   def isbot: .bot or (.author | test("\\[bot\\]$")) or (.author | test("^(group|project)_[0-9]+_bot_"))
     or (.author as $a | any($bots[]; . == $a));
   . as $s
@@ -463,7 +575,7 @@ GATE_PROGRAM="$JQ_TIME"'
   | [
       (if $s.state != "open" then "the PR is \($s.state)" else empty end),
       (if $s.draft then "the PR is a draft" else empty end),
-      (if $expect != "" and $s.head != $expect then "the head moved from \($expect[0:12]) to \($s.head[0:12])" else empty end),
+      (if $expect != "" and same($s.head; $expect) == false then "the head moved from \($expect[0:12]) to \($s.head[0:12])" else empty end),
       (if $s.conflict == "conflict" then "the PR has merge conflicts"
        elif $s.conflict == "behind" then "the branch is behind its base"
        elif $s.conflict == "unknown" then "mergeability is not computed yet (\($s.merge_status))" else empty end),
@@ -483,12 +595,12 @@ GATE_PROGRAM="$JQ_TIME"'
     ]
   | {clean: (length == 0), head: $s.head, reasons: .}'
 
-TRIGGER_PROGRAM="$JQ_TIME"'
+TRIGGER_PROGRAM="$JQ_TIME$HEAD_SAME"'
   . as $s
   | {
       state: $s.state,
       triggers: [
-        (if $s.head != $head then "the head moved to \($s.head[0:12])" else empty end),
+        (if same($s.head; $head) == false then "the head moved to \($s.head[0:12])" else empty end),
         (if $s.ci == "failure" then "checks are failing on \($s.head[0:12])" else empty end),
         (if $s.changes_requested then "changes were requested" else empty end),
         (if $s.conflict == "conflict" then "the PR has merge conflicts" else empty end),
@@ -554,8 +666,8 @@ park_preflight() {  # <id>
   [ "${kind:-ship}" = ship ] || { echo "only a ship lane can park (kind=$kind)"; return 1; }
   pr=$(fm_meta_get "$meta" pr)
   [ -n "$pr" ] || { echo "no PR is recorded (pr=)"; return 1; }
-  if ! fm_pr_url_parse "$pr" || { [ "$FM_PR_PROVIDER" != github ] && [ "$FM_PR_PROVIDER" != gitlab ]; }; then
-    echo "parking supports GitHub pull requests and GitLab merge requests only"; return 1
+  if ! fm_pr_url_parse "$pr" || { [ "$FM_PR_PROVIDER" != github ] && [ "$FM_PR_PROVIDER" != gitlab ] && [ "$FM_PR_PROVIDER" != bitbucket ]; }; then
+    echo "parking supports GitHub pull requests, GitLab merge requests and Bitbucket Cloud pull requests only"; return 1
   fi
   [ -f "$STATE/$id.check.sh" ] || { echo "no merge poll is armed (run bin/fm-pr-check.sh first)"; return 1; }
   [ ! -e "$(record_path "$id")" ] || { echo "already parked"; return 1; }
@@ -617,7 +729,7 @@ cmd_park() {
   fi
   head=$(printf '%s' "$result" | jq -r .head)
   local_head=$(git -C "$(fm_meta_get "$STATE/$id.meta" worktree)" rev-parse HEAD 2>/dev/null || true)
-  [ "$local_head" = "$head" ] || die "refusing to park $id: the local copy is at ${local_head:0:12}, the PR head is ${head:0:12}"
+  head_same "$local_head" "$head" || die "refusing to park $id: the local copy is at ${local_head:0:12}, the PR head is ${head:0:12}"
   pr=$(fm_meta_get "$STATE/$id.meta" pr)
   lease=$(slot_lease "$id") || die "refusing to park $id: its pool slot could not be leased durably"
   # Review activity after this moment relaunches the lane once it is parked.

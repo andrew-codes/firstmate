@@ -19,6 +19,7 @@ PARK="$ROOT/bin/fm-park.sh"
 TMP_ROOT=$(fm_test_tmproot fm-park-tests)
 GH_URL=https://github.com/example/repo/pull/7
 GL_URL=https://gitlab.example.com/team/sub/repo/-/merge_requests/7
+BB_URL=https://bitbucket.org/team/repo/pull-requests/7
 NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 OLD_ISO=2026-01-01T00:00:00Z
 
@@ -87,6 +88,16 @@ case "\$*" in
     esac
     ;;
   *) [ ! -e "$world/gl.mr.fail" ] || exit 1; cat "$world/gl.mr.json" ;;
+esac
+SH
+  cat > "$fakebin/twg" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$world/twg.log"
+[ ! -e "$world/twg.hang" ] || sleep 30
+case "\$*" in
+  *" mergeability "*) [ ! -e "$world/bb.merge.fail" ] || exit 1; cat "$world/bb.merge.json" ;;
+  *"pull-requests get"*) [ ! -e "$world/bb.get.fail" ] || exit 1; cat "$world/bb.get.json" ;;
+  *) exit 2 ;;
 esac
 SH
   cat > "$fakebin/treehouse" <<SH
@@ -221,6 +232,52 @@ gl_fixture() {  # <world> [key=value...]
   printf '%s\n' "$notes" > "$world/gl.discussions.json"
 }
 
+# Bitbucket fixtures: the PR read (--statuses --comments) and its mergeability
+# checks, clean by default: a green build, passing merge checks apart from the
+# human approval still owed, no comments, and no reviewer bot, with CI and the
+# push long past the quiet window. Bitbucket reports the head abbreviated to 12
+# characters. Arguments override fields; JSON ones take JSON.
+bb_fixture() {  # <world> [key=value...]
+  local world=$1 kv
+  shift
+  local state=OPEN draft=false head='' statuses='' merge='' comments='[]' participants='[]' count='' updated=$OLD_ISO
+  head=$(cut -c1-12 "$world/head")
+  statuses='[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"2026-01-01T00:00:00.000000+00:00","updated_on":"2026-01-01T00:00:00.000000+00:00"}]'
+  merge='[{"type":"git_mergeability_check","status":"PASSED","blocking":true},{"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"PASSED","blocking":true},{"type":"merge_check","check":{"kind":"require_approvals_to_merge"},"status":"FAILED","blocking":true}]'
+  for kv in "$@"; do
+    case "$kv" in
+      state=*) state=${kv#*=} ;; draft=*) draft=${kv#*=} ;; head=*) head=${kv#*=} ;;
+      statuses=*) statuses=${kv#*=} ;; merge=*) merge=${kv#*=} ;; comments=*) comments=${kv#*=} ;;
+      participants=*) participants=${kv#*=} ;; count=*) count=${kv#*=} ;; updated=*) updated=${kv#*=} ;;
+    esac
+  done
+  jq -n --arg state "$state" --argjson draft "$draft" --arg head "$head" --argjson statuses "$statuses" \
+    --argjson comments "$comments" --argjson participants "$participants" --arg count "$count" --arg updated "$updated" \
+    '[{state:$state,draft:$draft,updated_on:$updated,source:{commit:{hash:$head}},
+       author:{uuid:"{author}",display_name:"Author",nickname:"author",type:"user"},
+       participants:$participants,_statuses:$statuses,_comments:$comments,
+       comment_count:(if $count == "" then ($comments | length) else ($count | tonumber) end)}]' > "$world/bb.get.json"
+  printf '%s\n' "$merge" > "$world/bb.merge.json"
+}
+
+# bb_comment <id> <who> <created> [inline=1] [parent=<id>] [resolved=1] [type=<user type>]
+bb_comment() {
+  local id=$1 who=$2 at=$3 kv inline=null parent=null resolution=null type=user
+  shift 3
+  for kv in "$@"; do
+    case "$kv" in
+      inline=1) inline='{"path":"bin/x.sh","to":4,"from":null}' ;;
+      parent=*) parent="{\"id\":${kv#*=}}" ;;
+      resolved=1) resolution='{"type":"resolution"}' ;;
+      type=*) type=${kv#*=} ;;
+    esac
+  done
+  jq -nc --argjson id "$id" --arg who "$who" --arg at "$at" --argjson inline "$inline" --argjson parent "$parent" \
+    --argjson resolution "$resolution" --arg type "$type" \
+    '{id:$id,user:{uuid:("{" + $who + "}"),display_name:$who,nickname:$who,type:$type},created_on:$at,updated_on:$at,
+      deleted:false,pending:false,inline:$inline,parent:$parent,resolution:$resolution}'
+}
+
 expect_unclean() {  # <world> <label> <reason-substring>
   local world=$1 label=$2 want=$3 out rc=0
   rm -f "$world/gh.count"
@@ -234,7 +291,9 @@ expect_clean() {  # <world> <label>
   rm -f "$world/gh.count"
   out=$(run_park "$world" gate lane 2>&1) || rc=$?
   [ "$rc" = 0 ] || fail "$label: gate exit $rc, wanted clean: $out"
-  [ "$out" = "clean head=$(cat "$world/head")" ] || fail "$label: unexpected clean output: $out"
+  # Bitbucket reports the head abbreviated to 12 characters.
+  [ "$out" = "clean head=$(cat "$world/head")" ] || [ "$out" = "clean head=$(cut -c1-12 "$world/head")" ] \
+    || fail "$label: unexpected clean output: $out"
 }
 
 test_github_gate_clean_and_each_unclean_condition() {
@@ -367,6 +426,174 @@ test_gitlab_gate_clean_and_unclean_conditions() {
   [ "$rc" = 0 ] && [ -z "$out" ] || fail "gitlab unreachable forge: tick acted: $rc $out"
   [ -e "$w/state/lane.review-park" ] && [ ! -e "$w/control.log" ] || fail "gitlab unreachable forge: parked lane was relaunched"
   pass "gitlab gate: clean MR parks, and draft, conflict, rebase, CI running/failed/absent, changes requested, other merge blockers, unresolved threads, a pipeline on an older commit, and a review bot that has not finished each refuse, across every page of discussions; a failed page is unreadable for gate and tick"
+}
+
+test_bitbucket_gate_clean_and_unclean_conditions() {
+  local w out rc=0 head12 head
+  w=$(make_world bb-gate "$BB_URL")
+  head=$(cat "$w/head")
+  head12=${head:0:12}
+  bb_fixture "$w"
+  out=$(run_park "$w" gate lane 2>&1) || rc=$?
+  [ "$rc" = 0 ] && [ "$out" = "clean head=$head12" ] || fail "bitbucket clean: gate exit $rc: $out"
+  grep -qF -- "pull-requests get 7 --statuses --comments -w team -r repo -o json" "$w/twg.log" \
+    || fail "bitbucket gate did not read the PR with its statuses and comments: $(cat "$w/twg.log")"
+  grep -qF -- "pull-requests mergeability 7 -w team -r repo" "$w/twg.log" || fail "bitbucket gate did not read mergeability"
+  # The full head is the same commit as the abbreviated one the forge reports.
+  out=$(run_park "$w" gate lane --expect-head "$head" 2>&1) || fail "bitbucket expect-head: $out"
+  out=$(run_park "$w" gate lane --expect-head 0000000000000000000000000000000000000009 2>&1) || rc=$?
+  [ "$rc" = 3 ] || fail "bitbucket expect-head mismatch: exit $rc: $out"
+  case "$out" in *"the head moved from 000000000000 to $head12"*) ;; *) fail "bitbucket expect-head mismatch: $out" ;; esac
+  bb_fixture "$w" draft=true; expect_unclean "$w" bb-draft "the PR is a draft"
+  bb_fixture "$w" state=DECLINED; expect_unclean "$w" bb-declined "the PR is closed"
+  bb_fixture "$w" merge='[{"type":"git_mergeability_check","status":"FAILED","blocking":true}]'; expect_unclean "$w" bb-conflict "merge conflicts"
+  bb_fixture "$w" merge='[{"type":"git_mergeability_check","status":"PASSED"},{"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"FAILED","blocking":true}]'
+  expect_unclean "$w" bb-behind "behind its base"
+  bb_fixture "$w" merge='[{"type":"merge_check","check":{"kind":"maximum_commits_behind"},"status":"PASSED"}]'
+  expect_unclean "$w" bb-unknown "mergeability is not computed yet (absent)"
+  bb_fixture "$w" merge='[{"type":"git_mergeability_check","status":"PENDING"}]'
+  expect_unclean "$w" bb-pending-mergeability "mergeability is not computed yet (PENDING)"
+  bb_fixture "$w" merge='{"values":[{"type":"git_mergeability_check","status":"PASSED"},{"type":"merge_check","check":{"kind":"enforce_unresolved_tasks"},"status":"FAILED","blocking":true}]}'
+  expect_unclean "$w" bb-other-check "the forge reports merge status enforce_unresolved_tasks"
+  bb_fixture "$w" merge='[{"type":"git_mergeability_check","status":"PASSED"},{"type":"merge_check","check":{"kind":"enforce_unresolved_tasks"},"status":"FAILED","blocking":false}]'
+  expect_clean "$w" bb-non-blocking-check-ignored
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"INPROGRESS","created_on":"2026-01-01T00:00:00Z"}]'
+  expect_unclean "$w" bb-ci-running "CI is pending"
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"FAILED","created_on":"2026-01-01T00:00:00Z"}]'
+  expect_unclean "$w" bb-ci-failed "CI is failure"
+  bb_fixture "$w" 'statuses=[]'; expect_unclean "$w" bb-ci-none "CI is none"
+  # The newest status of a key decides: a rerun that passed clears the failure.
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"FAILED","created_on":"2026-01-01T00:00:00Z"},{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"2026-01-01T00:10:00Z"}]'
+  expect_clean "$w" bb-rerun-passed
+  bb_fixture "$w" merge='[{"type":"git_mergeability_check","status":"PASSED"},{"type":"merge_check","check":{"kind":"enforce_passing_builds"},"status":"FAILED","blocking":true}]'
+  expect_unclean "$w" bb-required-build-missing "CI is pending"
+  bb_fixture "$w" 'participants=[{"user":{"uuid":"{rev}","nickname":"rev","type":"user"},"role":"REVIEWER","approved":false,"state":"changes_requested","participated_on":"2026-01-01T00:01:00.000000+00:00"}]'
+  expect_unclean "$w" bb-changes "changes are requested"
+  # A reviewer approval needs no bot and is not a block.
+  bb_fixture "$w" 'participants=[{"user":{"uuid":"{rev}","nickname":"rev","type":"user"},"role":"REVIEWER","approved":true,"state":"approved","participated_on":"2026-01-01T00:01:00.000000+00:00"}]'
+  expect_clean "$w" bb-approved
+  # Threads: an unresolved anchored comment blocks, a resolved one or the
+  # author's own general note does not, and a reviewer's general comment does.
+  bb_fixture "$w" "comments=[$(bb_comment 1 rev 2026-01-01T00:02:00Z inline=1)]"
+  expect_unclean "$w" bb-thread "1 review thread(s) unresolved"
+  bb_fixture "$w" "comments=[$(bb_comment 1 rev 2026-01-01T00:02:00Z inline=1 resolved=1)]"
+  expect_clean "$w" bb-thread-resolved
+  bb_fixture "$w" "comments=[$(bb_comment 1 author 2026-01-01T00:02:00Z)]"
+  expect_clean "$w" bb-author-general-note
+  bb_fixture "$w" "comments=[$(bb_comment 1 rev 2026-01-01T00:02:00Z)]"
+  expect_unclean "$w" bb-general-thread "1 review thread(s) unresolved"
+  bb_fixture "$w" "comments=[$(bb_comment 1 rev 2026-01-01T00:02:00Z inline=1), $(bb_comment 2 author 2026-01-01T00:03:00Z parent=1)]"
+  expect_unclean "$w" bb-reply-does-not-resolve "1 review thread(s) unresolved"
+  bb_fixture "$w" "comments=[$(bb_comment 1 rev 2026-01-01T00:02:00Z inline=1)]" count=3
+  expect_unclean "$w" bb-comments-truncated "review threads could not all be read"
+  # Reviewer bots: an app user's comment alone does not settle the head, an
+  # approval it recorded after the push does, and the quiet window decides the rest.
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]' \
+    "comments=[$(bb_comment 1 coderabbit "$NOW_ISO" type=app_user resolved=1)]"
+  expect_unclean "$w" bb-bot-comment-only "automated reviewers (coderabbit) have not submitted a review of this head"
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]' \
+    "comments=[$(bb_comment 1 coderabbit "$NOW_ISO" type=app_user resolved=1)]" \
+    'participants=[{"user":{"uuid":"{bot}","nickname":"coderabbit","type":"app_user"},"role":"REVIEWER","approved":true,"state":"approved","participated_on":"'"$NOW_ISO"'"}]'
+  expect_clean "$w" bb-bot-reviewed-head
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]'
+  expect_unclean "$w" bb-no-bot "no automated reviewer has submitted a review of this head"
+  FM_TEST_QUIET=0 expect_clean "$w" bb-quiet-elapsed
+  bb_fixture "$w" "comments=[$(bb_comment 1 greptile "$OLD_ISO" resolved=1)]" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]'
+  printf 'greptile\n' > "$w/config/contribution-review-bots"
+  expect_unclean "$w" bb-listed-bot "automated reviewers (greptile)"
+  rm -f "$w/config/contribution-review-bots"
+  # Either unreadable half is an unreadable forge, never a clean verdict.
+  bb_fixture "$w"
+  : > "$w/bb.merge.fail"
+  out=$(run_park "$w" gate lane 2>&1) && fail "bitbucket mergeability outage: gate succeeded: $out"
+  rm -f "$w/bb.merge.fail"; : > "$w/bb.get.fail"
+  out=$(run_park "$w" gate lane 2>&1) && fail "bitbucket get outage: gate succeeded: $out"
+  rm -f "$w/bb.get.fail"
+  printf '[{"state":"OPEN","source":{"commit":{"hash":"abc"}}}]\n' > "$w/bb.get.json"
+  out=$(run_park "$w" gate lane 2>&1) && fail "bitbucket truncated head: gate succeeded: $out"
+  pass "bitbucket gate: clean PR parks, and draft, declined, conflict, behind, uncomputed mergeability, other blocking merge checks, CI running/failed/absent or a missing required build, changes requested, unresolved or unread threads, and a review bot that has not finished each refuse; approvals and the author's own notes do not; an unreadable half or head is never clean"
+}
+
+test_bitbucket_park_and_relaunch_triggers() {
+  local w head out later
+  later=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+
+  w=$(make_world bb-park "$BB_URL"); bb_fixture "$w"
+  head=$(cat "$w/head")
+  out=$(run_park "$w" park lane 2>&1) || fail "bitbucket park: $out"
+  case "$out" in "parked lane: PR $BB_URL clean at ${head:0:12}; agent stopped") ;; *) fail "bitbucket park: output $out" ;; esac
+  [ "$(cat "$w/control.log")" = "lane exit" ] || fail "bitbucket park: expected one control exit, got $(cat "$w/control.log")"
+  grep -qx "head=${head:0:12}" "$w/state/lane.review-park" || fail "bitbucket park: record lacks the parked head"
+  [ "$(grep -c 'pull-requests get' "$w/twg.log")" = 2 ] || fail "bitbucket park: expected a gate read and a re-check, got $(grep -c 'pull-requests get' "$w/twg.log")"
+  rm -f "$w/control.log"
+  out=$(run_park "$w" tick 2>&1) || true
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "bitbucket quiet parked lane acted: $out"
+  # A human approval and a merge-ready state keep the lane parked.
+  bb_fixture "$w" 'participants=[{"user":{"uuid":"{rev}","nickname":"rev","type":"user"},"role":"REVIEWER","approved":true,"state":"approved","participated_on":"'"$later"'"}]'
+  out=$(run_park "$w" tick 2>&1) || true
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] && [ -e "$w/state/lane.review-park" ] || fail "bitbucket approval relaunched the lane: $out"
+
+  w=$(make_world bb-trig-head "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" head=000000000009
+  expect_relaunch "$w" head "the head moved to 000000000009"
+
+  w=$(make_world bb-trig-ci "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"FAILED","created_on":"2026-01-01T00:00:00Z"}]'
+  expect_relaunch "$w" ci "checks are failing"
+
+  w=$(make_world bb-trig-changes "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" 'participants=[{"user":{"uuid":"{rev}","nickname":"rev","type":"user"},"role":"REVIEWER","approved":false,"state":"changes_requested","participated_on":"'"$later"'"}]'
+  expect_relaunch "$w" changes "changes were requested"
+
+  w=$(make_world bb-trig-conflict "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" merge='[{"type":"git_mergeability_check","status":"FAILED","blocking":true}]'
+  expect_relaunch "$w" conflict "merge conflicts"
+
+  w=$(make_world bb-trig-thread "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" "comments=[$(bb_comment 1 rev "$later" inline=1)]"
+  expect_relaunch "$w" thread "1 review thread(s) unresolved"
+
+  w=$(make_world bb-trig-comment "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" "comments=[$(bb_comment 1 carol "$later" resolved=1)]"
+  expect_relaunch "$w" comment "new comments from carol"
+
+  w=$(make_world bb-trig-unread "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" "comments=[$(bb_comment 1 carol "$OLD_ISO" resolved=1)]" count=4
+  expect_relaunch "$w" unread "review threads could not all be read"
+
+  # An outage retries on the next tick and never relaunches.
+  w=$(make_world bb-outage "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  : > "$w/bb.get.fail"
+  out=$(run_park "$w" tick 2>&1) || true
+  for _ in $(seq 1 20); do [ ! -e "$w/control.log" ] || break; sleep 0.1; done
+  [ -z "$out" ] && [ -e "$w/state/lane.review-park" ] && [ ! -e "$w/control.log" ] || fail "bitbucket outage relaunched the lane: $out"
+
+  w=$(make_world bb-closed "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" state=DECLINED
+  out=$(run_park "$w" tick 2>&1)
+  [ "$out" = "closed lane: PR $BB_URL was closed without merging; the lane needs a decision" ] || fail "bitbucket closed: $out"
+
+  w=$(make_world bb-merged "$BB_URL"); bb_fixture "$w"; park_world "$w"
+  bb_fixture "$w" state=MERGED
+  out=$(run_park "$w" tick 2>&1) || true
+  [ -z "$out" ] && [ ! -e "$w/control.log" ] || fail "bitbucket merged lane was relaunched or reported: $out"
+
+  w=$(make_world bb-auto-park "$BB_URL"); bb_fixture "$w"; : > "$w/config/park-on-review"
+  out=$(tick_and_report "$w" bb-auto-park)
+  case "$out" in "parked lane: PR $BB_URL clean at "*) ;; *) fail "bitbucket auto-park: tick output $out" ;; esac
+  pass "a clean Bitbucket PR parks with its abbreviated head, and a new head, failing build, requested changes, conflict, unresolved or unread thread, or new comment relaunches a fresh worker; approvals, outages and merges never do, and a declined PR is reported once"
+}
+
+test_bitbucket_read_is_bounded() {
+  local w out rc=0 started
+  w=$(make_world bb-bounded "$BB_URL"); bb_fixture "$w"
+  : > "$w/twg.hang"
+  started=$(date +%s)
+  out=$(FM_PARK_READ_SECS=1 run_park "$w" gate lane 2>&1) || rc=$?
+  [ "$rc" = 1 ] || fail "bitbucket hung twg: gate exit $rc, wanted 1 (unreadable): $out"
+  [ "$(( $(date +%s) - started ))" -lt 8 ] || fail "bitbucket hung twg: both reads together took longer than one bound"
+  pass "a hung twg read is cut at FM_PARK_READ_SECS, both Bitbucket reads share that one bound, and the gate reports an unreadable forge"
 }
 
 test_park_stops_agent_records_lane_and_leases_slot() {
@@ -1206,6 +1433,9 @@ fm_test_run \
   test_github_gate_refuses_until_every_required_check_reports \
   test_github_gate_waits_for_review_bots_or_quiet_window \
   test_gitlab_gate_clean_and_unclean_conditions \
+  test_bitbucket_gate_clean_and_unclean_conditions \
+  test_bitbucket_park_and_relaunch_triggers \
+  test_bitbucket_read_is_bounded \
   test_park_stops_agent_records_lane_and_leases_slot \
   test_park_refuses_unsupported_backend_before_side_effects \
   test_park_refuses_when_head_moves_after_the_verdict \
