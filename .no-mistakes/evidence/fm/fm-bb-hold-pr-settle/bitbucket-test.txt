@@ -1,0 +1,15 @@
+ok - an unanswered Bitbucket thread is raised after the age and again after each further age
+ok - only a reply by the pull request author answers a Bitbucket thread
+ok - a resolved Bitbucket thread is never raised
+ok - configured bot commenters and app accounts need no reply
+ok - inline comments from an app account count, its summary and notices do not
+ok - a merged or declined Bitbucket pull request ends tracking and is not read again
+ok - with the setting unset nothing is read, recorded or armed for Bitbucket
+registered: state/contributions.check.sh
+ok - arm plumbs the settings and Bitbucket never changes coverage rows
+ok - a failed or truncated Bitbucket read is reported once and never reads as silence
+ok - a GitHub pull request is read, shaped and projected as before beside a Bitbucket one
+ok - pr-policy accepts a canonical Bitbucket pull request URL and nothing looser
+ok - a merged Bitbucket pull request settles its declared hold with reply-age tracking off
+ok - a declined or superseded Bitbucket pull request is an unmerged closure, reported once and settled by a terminal policy
+ok - an untracked Bitbucket pull request is read only for a held task with settlement enabled
