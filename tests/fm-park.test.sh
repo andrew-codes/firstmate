@@ -495,6 +495,13 @@ test_bitbucket_gate_clean_and_unclean_conditions() {
     "comments=[$(bb_comment 1 coderabbit "$NOW_ISO" type=app_user resolved=1)]" \
     'participants=[{"user":{"uuid":"{bot}","nickname":"coderabbit","type":"app_user"},"role":"REVIEWER","approved":true,"state":"approved","participated_on":"'"$NOW_ISO"'"}]'
   expect_clean "$w" bb-bot-reviewed-head
+  bot_part='participants=[{"user":{"uuid":"{bot}","nickname":"coderabbit","type":"app_user"},"role":"REVIEWER","approved":true,"state":"approved","participated_on":"'"$NOW_ISO"'"}]'
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]' \
+    "comments=[$(bb_comment 1 coderabbit "$NOW_ISO" type=app_user)]" "$bot_part"
+  expect_clean "$w" bb-bot-general-summary-unresolved
+  bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]' \
+    "comments=[$(bb_comment 1 coderabbit "$NOW_ISO" type=app_user inline=1)]" "$bot_part"
+  expect_unclean "$w" bb-bot-inline-thread "1 review thread(s) unresolved"
   bb_fixture "$w" 'statuses=[{"key":"build","name":"build","state":"SUCCESSFUL","created_on":"'"$NOW_ISO"'","updated_on":"'"$NOW_ISO"'"}]'
   expect_unclean "$w" bb-no-bot "no automated reviewer has submitted a review of this head"
   FM_TEST_QUIET=0 expect_clean "$w" bb-quiet-elapsed

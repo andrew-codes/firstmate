@@ -412,6 +412,7 @@ BITBUCKET_NORMALIZE='
   def utc: if . == null then null else sub("[.][0-9]+"; "") | sub("[+]00:00$"; "Z") end;
   def who: .nickname // .display_name // .uuid // "ghost";
   def isapp: (.type == "app_user") or (.ai_agent == true);
+  def anchored: (.inline | type == "object") and (.inline.path // "") != "" and ((.inline.to // .inline.from) != null);
   (.[0] | norm) as $p
   | (.[1] | if type == "object" and has("data") then .data else . end | if type == "object" then .values else . end) as $m
   | if ($p | type) != "object" or ($m | type) != "array" then error("invalid pull request read") else . end
@@ -450,7 +451,8 @@ BITBUCKET_NORMALIZE='
       pushed_at: $pushed,
       changes_requested: (any($reviews[]; .rv == "changes_requested") or any($failed[]; kind | test("changes_requested"; "i"))),
       threads_unresolved: ([$live[] | select(.parent == null and (.resolution // null) == null
-          and (((.inline | type) == "object" and (.inline.path // "") != "") or (.user.uuid // "") != $author))] | length),
+          and ((.user | isapp) as $bot | if $bot then anchored
+               else ((.inline | type) == "object" and (.inline.path // "") != "") or (.user.uuid // "") != $author end))] | length),
       threads_complete: (($p._comments | type) == "array"
           and (($p.comment_count | type) != "number" or ($p._comments | length) >= $p.comment_count)),
       comments_complete: true,
