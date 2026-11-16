@@ -59,6 +59,23 @@ export FM_PARK_READ_SECS=30
 echo coderabbit >> config/contribution-review-bots
 ```
 
+## Bitbucket pull requests that answer a held decision
+
+`config/hold-pr-settle` is the upstream flag that lets a pull request event answer a decision you have put on hold.
+In this fork it also works for Bitbucket Cloud pull requests, so a hold can be answered when the pull request merges, is declined or superseded, or either.
+It needs no reply age: a Bitbucket pull request linked to a held decision is checked for its final state even when `config/contributions-reply-age` is unset.
+Firstmate only settles the hold and never changes the pull request.
+
+| Setting | What it controls |
+| --- | --- |
+| `config/hold-pr-settle` | An empty file that turns the feature on. Without it, nothing settles and no extra closure notice is sent. |
+
+```sh
+# Turn it on, then declare that a Bitbucket pull request closes the decision when it merges.
+touch config/hold-pr-settle
+bin/fm-captain-hold.sh pr-policy my-decision https://bitbucket.org/myworkspace/my-repo/pull-requests/7 merged close
+```
+
 ## Jira status transitions
 
 `config/jira-status-transitions` turns on Jira status follow-through for the projects it lists.

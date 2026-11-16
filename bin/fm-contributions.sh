@@ -37,6 +37,10 @@
 # other accepted URLs remain visibly unmeasured. A Bitbucket Cloud pull request
 # is the one exception, described with the reply age below, and is never a
 # coverage row.
+# With config/hold-pr-settle present, a Bitbucket pull request named by a held
+# task's backlog row is also observed, even with the reply age unset, so that its
+# merged, declined or superseded state can settle the hold; an untracked read
+# keeps no thread list and changes nothing on the forge.
 # poll skips unsupported URLs without forge calls, unavailable output, wakes or
 # new error stamps, and clears their legacy errors without changing observation,
 # timestamps or ownership evidence.
@@ -201,7 +205,8 @@
 # state and unanswered threads alone, so these pull requests never become
 # coverage rows, counts or unmeasured entries. arm copies the ignore setting
 # into the generated check, as it does the reply age, and arm --if-owned
-# counts a Bitbucket pull request only while the reply age is set.
+# counts a Bitbucket pull request only while the reply age is set or a held
+# task's linked one can settle its hold.
 # Source bodies are data, never commands.
 # All mutations serialize on this home's .contributions.lock. Writes refuse
 # symlinks and publish by rename. No forge writes are performed.
@@ -257,6 +262,8 @@ if [ -n "$REPLY_AGE" ]; then
 else
   REPLY_AGE=0
 fi
+SETTLE_HOLDS=false
+[ ! -f "$CONFIG/hold-pr-settle" ] || SETTLE_HOLDS=true
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
@@ -774,16 +781,15 @@ poll() {
       | if . != null and (.observation.state | IN("merged","closed")) then .error == null else null end] as $final
     | [(if all($final[]; .) then "settled" elif any($final[]; . != null) then "final" else "live" end), $known.url]
       + $known.tasks | @tsv' > "$TMP/known.tsv"
-  if [ "$TRACK_THREADS" = true ]; then
-    jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-      bitbucket_known($input[0];$saved[0])
+  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
+    --argjson track "$TRACK_THREADS" --argjson settle "$SETTLE_HOLDS" '
+      bitbucket_polled($input[0];$saved[0];$track;$settle)
       | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
       | .[] | . as $known
       | [$known.tasks[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $known.url)] | first
         | if . != null and (.observation.state | IN("merged","closed")) then .error == null else null end] as $final
       | [(if all($final[]; .) then "settled" elif any($final[]; . != null) then "final" else "live" end), $known.url]
         + $known.tasks | @tsv' >> "$TMP/known.tsv"
-  fi
   : > "$TMP/live.tsv"
   # One pass picks the retained closures still owed to an open captain hold, so
   # a home's settled history costs no process per row.
@@ -853,7 +859,9 @@ poll() {
           | ($tracked | map(.key)) as $live
           | ($due | map(.key)) as $due_keys
           | $old + {checked_at:$now,error:null,
-            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
+            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}
+              # Untracked Bitbucket reads settle holds only; keep no thread list.
+              | if $track or (has("threads") | not) then . else .threads = [] end),
             seen:((($old.seen // []) + ($events | map(.token))) | unique),
             pending:((($old.pending // []) + $arrived
                 | map(select(.type != "unanswered" or (.thread as $k | ($live | index($k)) != null and ($due_keys | index($k)) == null))))
@@ -879,9 +887,11 @@ arm() {
   acquire
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
-    # A Bitbucket pull request counts only while review-thread tracking is on.
+    # A Bitbucket pull request counts only while review-thread tracking is on or
+    # a held task's linked one can settle its hold.
     if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" --argjson track "$TRACK_THREADS" \
-      --slurpfile saved "$TMP/saved.json" 'known($input[0];$saved[0]) + (if $track then bitbucket_known($input[0];$saved[0]) else [] end) | length > 0' >/dev/null; then
+      --argjson settle "$SETTLE_HOLDS" --slurpfile saved "$TMP/saved.json" \
+      'known($input[0];$saved[0]) + bitbucket_polled($input[0];$saved[0];$track;$settle) | length > 0' >/dev/null; then
       return 0
     fi
   fi

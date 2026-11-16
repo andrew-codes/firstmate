@@ -878,7 +878,9 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 The optional local, gitignored `config/hold-pr-settle` presence flag enables settlement of explicitly declared PR-dependent captain holds.
 Create the empty flag in the owning home and use `bin/fm-captain-hold.sh pr-policy` to declare each hold's settlement policy.
 The command's `--help` owns its arguments and durable record format.
-The existing contribution observer applies matching GitHub merge or closure evidence, including observations retained after the worker stops.
+The existing contribution observer applies matching GitHub or Bitbucket Cloud merge or closure evidence, including observations retained after the worker stops.
+A Bitbucket Cloud PR linked to a held task is read for its terminal state even when `config/contributions-reply-age` is unset, and it is never merged or otherwise changed.
+A declined or superseded Bitbucket PR counts as an unmerged closure.
 It also reports an unmerged closure through the contribution notification channel, once for each owning task that is still an open captain hold after settlement.
 A task without a captain hold gets no closure notification, so enabling the flag does not replay historical closed PRs.
 No captain answer is invented, and unrelated holds remain open.

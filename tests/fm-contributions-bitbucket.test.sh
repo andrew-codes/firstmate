@@ -293,8 +293,106 @@ SH
   pass 'a GitHub pull request is read, shaped and projected as before beside a Bitbucket one'
 }
 
+# hold_home <name>: a home with no fleet task, one held decision linking the Bitbucket PR, and settlement on.
+hold_home() {
+  local home
+  home=$(new_home "$1")
+  rm "$home/state/task-a.meta"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add decision "Decide this PR $URL" >/dev/null || fail 'add failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold decision --reason 'Decide this PR' >/dev/null || fail 'hold failed'
+  printf '%s\n' "$home"
+}
+
+poll_untracked() { # home now: a poll with reply-age tracking off
+  local home=$1 now=$2
+  with_home "$home" env FM_CONTRIBUTIONS_NOW="$now" "$ROOT/bin/fm-contributions.sh" poll
+}
+
+test_hold_policy_accepts_a_bitbucket_url() {
+  local home
+  home=$(hold_home policy-url)
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy decision "$URL" merged close >/dev/null \
+    || fail 'a Bitbucket pull request URL was refused'
+  jq -e --arg url "$URL" '.url == $url and .on == "merged" and .action == "close"' "$home/data/decision/hold-pr-policy.json" >/dev/null \
+    || fail 'the Bitbucket policy was not recorded'
+  # A hold that does not name the pull request yet is linked by the declaration.
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add unlinked 'Decide without a link' >/dev/null || fail 'add failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold unlinked --reason 'Decide without a link' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy unlinked "$URL" terminal release >/dev/null || fail 'an unlinked hold was not linked'
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show unlinked --full | grep -F "$URL" >/dev/null || fail 'the declaration did not link the pull request'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open unlinked || fail 'linking the pull request released the hold'
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy decision https://bitbucket.org/myworkspace/pull-requests/7 merged close 2>/dev/null; then
+    fail 'a malformed Bitbucket URL was accepted'
+  fi
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy decision https://example.com/o/r/pull-requests/7 merged close 2>/dev/null; then
+    fail 'a foreign host was accepted'
+  fi
+  pass 'pr-policy accepts a canonical Bitbucket pull request URL and nothing looser'
+}
+
+test_merged_bitbucket_pr_settles_a_hold_without_reply_age() {
+  local home out body
+  home=$(hold_home settle-merged)
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy decision "$URL" merged close >/dev/null || fail 'policy failed'
+  out=$(poll_untracked "$home" "$T0") || fail 'open poll failed'
+  [ -z "$out" ] || fail "an open pull request produced output: $out"
+  jq -e '.records[0].observation.state == "open" and (.records[0].observation.threads | length) == 0' "$home/data/decision/contributions.json" >/dev/null \
+    || fail 'an untracked read kept a thread list'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open decision || fail 'an open pull request settled the hold'
+  write_pr "$home" MERGED '[]'
+  out=$(poll_untracked "$home" "$HOUR") || fail 'merged poll failed'
+  [ -z "$out" ] || fail "a successful settlement produced poll output: $out"
+  if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open decision; then fail 'a merged Bitbucket pull request left the hold open'; fi
+  body=$(with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show decision --full)
+  printf '%s\n' "$body" | grep -F "Forge PR merged: $URL" >/dev/null || fail 'terminal evidence missing from the settled hold'
+  printf '%s\n' "$body" | grep -F 'Captain decision:' >/dev/null && fail 'forge event claimed a captain answer'
+  [ ! -e "$home/data/decision/hold-pr-policy.json" ] || fail 'a settled policy was kept'
+  [ ! -s "$home/forge/gh.log" ] || fail "settlement reached gh: $(cat "$home/forge/gh.log")"
+  pass 'a merged Bitbucket pull request settles its declared hold with reply-age tracking off'
+}
+
+test_closed_bitbucket_pr_settles_and_notifies_once() {
+  local home state out
+  for state in DECLINED SUPERSEDED; do
+    home=$(hold_home "settle-$state")
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy decision "$URL" merged close >/dev/null || fail 'policy failed'
+    write_pr "$home" "$state" '[]'
+    out=$(poll_untracked "$home" "$HOUR") || fail "$state poll failed"
+    # The policy waits for a merge, so the other terminal state drops it and keeps the hold.
+    printf '%s\n' "$out" | grep -Fq 'dropped the PR policy for decision' || fail "$state did not drop the merge-only policy: $out"
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open decision || fail "$state closed a merge-only hold"
+    with_home "$home" "$ROOT/bin/fm-contributions.sh" pending \
+      | jq -e --arg url "$URL" '[.[] | select(.type == "closed" and .url == $url) | .task] == ["decision"]' >/dev/null \
+      || fail "$state closure was not reported once to the held task"
+    poll_untracked "$home" 2026-09-16T10:00:00Z >/dev/null || fail 'repeat poll failed'
+    with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e '[.[] | select(.type == "closed")] | length == 1' >/dev/null \
+      || fail "$state closure was reported twice"
+    # An unmerged closure settles a hold that declared it.
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy decision "$URL" terminal close >/dev/null || fail 'second policy failed'
+    poll_untracked "$home" 2026-09-16T11:00:00Z >/dev/null || fail 'settling poll failed'
+    if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open decision; then fail "$state did not settle a terminal policy"; fi
+  done
+  pass 'a declined or superseded Bitbucket pull request is an unmerged closure, reported once and settled by a terminal policy'
+}
+
+test_bitbucket_hold_needs_the_flag_and_a_hold() {
+  local home
+  home=$(hold_home flag-off)
+  rm "$home/config/hold-pr-settle"
+  poll_untracked "$home" "$T0" >/dev/null || fail 'poll without the flag failed'
+  [ ! -s "$home/forge/twg.log" ] || fail 'a Bitbucket pull request was read without the flag or reply age'
+  home=$(new_home no-hold)
+  rm "$home/state/task-a.meta"
+  touch "$home/config/hold-pr-settle"
+  with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add plain "Plain work $URL" >/dev/null || fail 'add failed'
+  poll_untracked "$home" "$T0" >/dev/null || fail 'poll without a hold failed'
+  [ ! -s "$home/forge/twg.log" ] || fail 'a Bitbucket pull request of an unheld task was read'
+  pass 'an untracked Bitbucket pull request is read only for a held task with settlement enabled'
+}
+
 failures=0
-for test_name in test_unanswered_thread_is_raised_after_the_age_and_again test_author_reply_answers test_resolved_thread_is_answered test_bot_comments_are_ignored test_inline_bot_comments_count test_merged_pull_request_ends_tracking test_unset_setting_reads_nothing test_arm_and_coverage test_failed_read_is_reported_once test_github_path_is_unchanged; do
+for test_name in test_unanswered_thread_is_raised_after_the_age_and_again test_author_reply_answers test_resolved_thread_is_answered test_bot_comments_are_ignored test_inline_bot_comments_count test_merged_pull_request_ends_tracking test_unset_setting_reads_nothing test_arm_and_coverage test_failed_read_is_reported_once test_github_path_is_unchanged test_hold_policy_accepts_a_bitbucket_url test_merged_bitbucket_pr_settles_a_hold_without_reply_age test_closed_bitbucket_pr_settles_and_notifies_once test_bitbucket_hold_needs_the_flag_and_a_hold; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures Bitbucket contribution regressions"
