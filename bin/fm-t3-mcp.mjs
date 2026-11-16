@@ -997,10 +997,11 @@ async function capture(flags) {
 // thread's latest run.
 async function waitRun(session, threadId, runId, timeoutMs, signal) {
   const deadline = Date.now() + timeoutMs;
+  let slice = Math.min(WAIT_SLICE_MS, timeoutMs);
   for (;;) {
-    const slice = Math.min(WAIT_SLICE_MS, Math.max(1, deadline - Date.now()));
     const out = await session.call("t3_thread_wait", { threadId, ...(runId ? { runId } : {}), timeoutMs: slice }, { timeoutMs: slice + 15_000, signal });
     if (out?.timedOut !== true || Date.now() >= deadline) return out;
+    slice = Math.min(WAIT_SLICE_MS, Math.max(1, deadline - Date.now()));
   }
 }
 

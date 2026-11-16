@@ -895,6 +895,9 @@ The optional local, gitignored `config/park-on-review` presence flag opts this h
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
 Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
 Both flags are home-local and not inherited by secondmate homes.
+Parking reads GitHub pull requests, GitLab merge requests and Bitbucket Cloud pull requests.
+A Bitbucket pull request is read through the operator's own signed-in `twg`, and Firstmate never merges it.
+`FM_PARK_READ_SECS` bounds each forge read; the two Bitbucket reads run at once under that one bound, so raise it when `twg` is slow.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
 
 ## PR registration scan (config/pr-register-scan)
