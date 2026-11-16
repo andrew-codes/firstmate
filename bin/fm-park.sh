@@ -254,8 +254,10 @@ lane_busy() {  # <id>
 # (so a bound on the caller's group cannot reach it), nohup, and stdio closed
 # (so it holds no pipe of the watcher open), in a subshell that returns at once.
 action_start() {  # <id> <verb> <args...>
+  # The subshell's own stderr is silenced too: under load bash can warn that a
+  # fast-exiting child's setpgid failed, which is noise on the watcher's output.
   ( set -m 2>/dev/null || true
-    nohup "$SCRIPT_DIR/fm-park.sh" run "$@" </dev/null >/dev/null 2>&1 & )
+    nohup "$SCRIPT_DIR/fm-park.sh" run "$@" </dev/null >/dev/null 2>&1 & ) 2>/dev/null
 }
 
 # Publishes one outcome line for the next tick to report.
