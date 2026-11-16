@@ -46,6 +46,7 @@ Nothing is parked until you create `config/park-on-review`.
 | `config/contribution-review-bots` | One review bot per line. On Bitbucket, name the bot by its nickname. Bitbucket app users and AI agent accounts are already treated as review bots. |
 
 A pull request is parked only when it is open and not a draft, has no merge conflict, has a passing build on its latest commit, has no reviewer asking for changes, and has no unresolved review thread.
+A review bot's comment counts as an unresolved thread only when attached to a line of code.
 An approval that is still owed does not stop parking.
 A branch counts as behind its target only when the repository turns on the maximum-commits-behind merge check.
 
